@@ -144,3 +144,35 @@ RED: 2/5 통과
 - **이미 적용된 수정**(슬라이스 2 커밋 a81b6b0): `SubprocessEngine.run`이 subprocess env의 `TGATES_HOME`을 run root로 명시 주입 → ambient 무시. 검증: ambient `TGATES_HOME=실toolkit` set 상태로 verify 돌려도 실 `.tgates-active` 생존·banner는 격리 cwd 생성 확인.
 - **복구 조치**: 내 초기 verify가 삭제한 실 toolkit `.tgates-active`(런타임 마커, gitignored)를 `touch`로 재생성 — 사고 전 상태 복원. 은수 세션로그 파일은 본인 작성분이라 손대지 않음.
 - **교훈/백로그(teammode 설계)**: conformance 격리를 더 강하게 — `env -i` 류로 ambient 전부 차단 후 명시 변수만 주입하는 방식 검토(현 구현은 `dict(os.environ)` 복사 후 override라 다른 누수 변수 가능성 잔존). 또한 무인 빌드 에이전트 디스패치 자체도 깨끗한 env로 띄우는 것을 권고.
+
+---
+
+## 슬라이스 P1 — 엔진 env 비신뢰 + settings 오염 가드 (2026-06-13)
+
+> 슬라이스 0.4 적대적 검수가 잡은 근본: 변수명 rename(0.1)은 반쪽. 엔진(teammode.py)이 ambient `TEAMMODE_HOME`을 무조건 신뢰 → SubprocessEngine 격리를 **우회한 직접 CLI 호출** 시 동일 호스트 오염 재현 가능.
+
+### 결정/근거
+- **P1-a — `--root` 정책 (A) 채택**: `_team_root()` 자체를 삭제하고, 팀 루트는 `--root <경로>` 명시 인자로만 받는다. `--root` 미지정 시 **에러 종료(exit 2)** — (B) cwd 폴백 대비 (A)를 택한 이유: 엔진이 "어느 폴더를 건드릴지 추측"하는 표면을 0으로 만드는 것이 사고의 근본 처방. env 폴백 완전 제거. 어댑터가 이미 `settings_path`를 명시로 받는 철학과 일치.
+- **P2 — settings 명시 필수 가드**: `--settings <경로>`(격리 모드) 또는 `--install`(실설치 → `~/.claude/settings.json`) 중 하나가 없으면 거부(exit 2). 이유: P1-a로 `--root`는 막혔지만 `--settings` 기본값이 실 `~/.claude`라 별도 오염 표면이 남아 있었음(실제로 RED 단계에서 `~/.claude/settings.json`에 teammode 훅이 누수됨 → 확인 즉시 제거). `--install`은 실설치 정상 동작 보장(가짜 HOME e2e: 4훅 등록 확인). 과방어로 설치를 깨지 않음.
+- **호출처 동기화**:
+  - `conformance/check.py` `SubprocessEngine.run` — env로 `TEAMMODE_HOME` 주입하던 것을 제거(env 화이트리스트에 팀루트 변수 없음). 대신 동사 뒤에 `--root <run root>`를 명시 삽입. CLI `main()`은 `--settings`가 없으면 run root 하위 `.teammode-settings.json`을 자동 주입(타 구현은 미지 플래그로 무시, §2 C2).
+  - `infra/hooks/session-log-remind.py` — **env 유지**. 런타임 훅은 에이전트 하니스가 발동해 `--root`를 받을 통로가 없으므로 스펙 01 §1.2의 "팀 루트 환경변수(필수)"를 read-only로 참조하는 게 정당. 엔진과의 구분을 docstring에 명시(엔진=의도적 호출=명시 인자, 훅=수동 발동=env).
+  - 스펙 01 §1.2(팀 루트 정의)·§2.4(쓰기 위치)에 "엔진/어댑터는 명시 인자로만, env 비신뢰, 미지정 시 에러" 반영. reference 변수명도 `TGATES_HOME`→`TEAMMODE_HOME` 정정.
+  - 기존 `test_isolation` 의 `_isolated_env` 기대값 수정(팀루트 변수가 env에 **없음**을 단언으로 전환) — 인터페이스 변경에 따른 정당한 기대값 갱신.
+
+### 라운드 1 (TDD → 구현 → 적대적 자기검수)
+- RED: `tests/test_isolation.py`에 P1-b/P2 회귀 5종 추가 → 현 엔진이 env를 읽어 전부 실패 확인. **RED 실행 자체가 `~/.claude/settings.json`을 오염**시킴(conftest 가드가 적발) = P2 버그의 실증. 즉시 수동 제거·복구.
+- GREEN: `teammode.py` argparse 손파싱 재작성(verb/--root/--settings/--install) + `_resolve_settings` 가드 + check.py 동기화 → 전 테스트 통과.
+- **적대적 자기검수(별도 시각 — "ambient env로 호스트 오염 재현 시도", /tmp 피해자만 사용)**: 4종 공격 — ① ambient `TEAMMODE_HOME=피해자`+`off --root 격리` → 피해자 마커 생존 ② `--root` 없는 `off` → 에러 종료·cwd 무접촉 ③ `--settings`/`--install` 없는 `on` → 거부·마커 미생성 ④ 플래그 순서 뒤섞기(`--settings ... --root ...`) → 정상 바인딩·피해자 무변. **전부 차단**. 실 `tgates-toolkit` 무접촉(피해자는 전부 `mktemp -d`). 실 `~/.claude/settings.json` 누수 0 + conftest 가드 통과.
+- 재검수: 구현 결함 0건. "수정할 내역 없음".
+
+### 2.7' verify 재실행 — 격리 경로로 (실행 증거, 적대 ambient env 하에서)
+```
+ROOT=/tmp/tmp.XXXX  (ambient TEAMMODE_HOME=/tmp/SHOULD_NOT_BE_TOUCHED 무시됨)
+[PASS] 01-on-banner / [PASS] 05-off-persist
+[FAIL] 02·03·04 (동사 미구현, 후속 슬라이스 RED 유지)
+RED: 2/5 통과  — settings는 root 하위 .teammode-settings.json에만, 피해자 경로 미생성
+```
+
+### 결과
+- 신규 테스트 5개(직접호출 off/on×env무시·--root필수, P2 거부) green. 기존 `_isolated_env` 단언 갱신. **누적 56 passed** (기준선 51 → 56). 슬라이스 P1 검수 통과("수정할 내역 없음").
