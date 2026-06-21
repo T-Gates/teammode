@@ -70,3 +70,21 @@ def test_dispatch_install_flag_allows_real_install_path(tmp_path, monkeypatch):
     assert rc == 0
     written = fake_home / ".claude" / "settings.json"
     assert written.is_file(), "fake HOME 의 .claude/settings.json 에 쓰여야 함"
+
+
+def test_dispatch_codex_sync_allows_config_path(tmp_path):
+    """Codex 디스패처 게이트는 --config 를 settings 어휘로 인정한다."""
+    config = tmp_path / "config.toml"
+    rc = _run_dispatch(["--codex", "--config", str(config), "sync", "--on"])
+    assert rc == 0
+    assert config.is_file()
+    text = config.read_text()
+    assert "# teammode-hooks-start" in text
+    assert "normalize.py" in text
+
+
+def test_dispatch_codex_refuses_without_config_or_install(capsys):
+    rc = _run_dispatch(["--codex", "sync", "--on"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--config" in err

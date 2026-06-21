@@ -279,14 +279,14 @@ def test_codex_uninstall_removes_mcp_block(tmp_path):
 def test_codex_sync_empty_slot_info_no_matcher(tmp_path, capsys):
     """Codex sync 도 빈 슬롯 MCP 매처를 [info] 생략(claude 와 동형).
 
-    ⚠️ Codex 는 PreToolUse=null 이라 confirm-action 매처는 이벤트 미지원으로도 빠진다.
-    여기서는 PostToolUse(linear 가 아닌 file_edit) 가 정상 등록되는지로 '전체 실패 아님'만 확정.
+    빈 services dict 가 있으면 PreToolUse MCP 매처는 슬롯 미연결으로 생략된다.
+    여기서는 PostToolUse(file_edit) 가 정상 등록되는지로 '전체 실패 아님'을 확정.
     """
     root = _scaffold(tmp_path, {})
     _codex(root, tmp_path).sync(mode="on")
     out = capsys.readouterr().out
     txt = Path(tmp_path / "codex.config.toml").read_text()
-    # PreToolUse(linear) 는 등록 안 됨, PostToolUse(file_edit) 는 등록됨 — 전체 실패 아님
+    # PreToolUse(linear) 는 빈 슬롯이라 생략, PostToolUse(file_edit) 는 등록됨 — 전체 실패 아님
     assert "PostToolUse" in txt
 
 

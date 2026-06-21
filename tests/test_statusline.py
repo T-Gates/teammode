@@ -81,11 +81,11 @@ def _codex_events_json():
         "events": {
             "SessionStart": "SessionStart",
             "UserPromptSubmit": "UserPromptSubmit",
-            "PreToolUse": None,
+            "PreToolUse": "PreToolUse",
             "PostToolUse": "PostToolUse",
         },
         "actions": {"file_edit": "apply_patch"},
-        "mcp_tool_format": "{server}.{tool}",
+        "mcp_tool_format": "mcp__{server}__{tool}",
     }
 
 

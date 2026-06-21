@@ -384,11 +384,17 @@ def _dispatch(agent, rest) -> int:
         print(f"[error] {agent} 어댑터 없음: {adapter_path}", file=sys.stderr)
         return 2
 
-    # L1-0 P2 가드(엔진 _resolve_settings 계승): 어댑터의 --settings 기본값이 실
-    # ~/.claude/settings.json 이므로, 디스패처가 명시(--settings 격리)/실설치 의사
-    # (--install) 없이 위임하면 실 호스트 오염. 둘 다 없으면 거부(exit 2).
-    if "--settings" not in rest and "--install" not in rest:
-        print("[error] --settings <경로> (격리) 또는 --install (실설치) 중 하나가 "
+    # L1-0 P2 가드(엔진 _resolve_settings 계승): 어댑터별 settings 어휘를 인지한다.
+    # claude=--settings, codex=--config. 명시 격리 또는 --install 실설치 의사 없이
+    # 위임하면 각 어댑터 기본값이 실 호스트 설정 파일을 오염시킬 수 있다.
+    agent_flags = {
+        "claude": ("--settings",),
+        "codex": ("--config",),
+    }
+    settings_flags = agent_flags.get(agent, ("--settings", "--config"))
+    if not any(flag in rest for flag in settings_flags) and "--install" not in rest:
+        flag_hint = " 또는 ".join(f"{flag} <경로>" for flag in settings_flags)
+        print(f"[error] {flag_hint} (격리) 또는 --install (실설치) 중 하나가 "
               "필요합니다. 명시 없이 실 호스트 설정에 쓰지 않습니다.", file=sys.stderr)
         return 2
     rest = _strip_dispatch_only_args(rest)
@@ -467,6 +473,58 @@ def _engine_call(argv) -> int:
     if proc.stderr:
         sys.stderr.write(proc.stderr)
     return proc.returncode
+
+
+def _verify_agent_artifact(agent: str, path: Path, err) -> bool:
+    """격리 배선 산출물이 실제 hook 설정을 담았는지 확인한다."""
+    if agent == "claude":
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError) as e:
+            err(f"[error] verify: claude settings 검증 실패({path}): {e}")
+            return False
+        if not isinstance(data, dict) or "hooks" not in data:
+            err(f"[error] verify: claude settings 검증 실패({path}): hooks 키 없음.")
+            return False
+        return True
+
+    if agent == "codex":
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as e:
+            err(f"[error] verify: codex config 검증 실패({path}): {e}")
+            return False
+        if "# teammode-hooks-start" not in text:
+            err(f"[error] verify: codex config 검증 실패({path}): hook marker 없음.")
+            return False
+        if "[[hooks.PreToolUse]]" not in text:
+            err(f"[error] verify: codex config 검증 실패({path}): PreToolUse hook 없음.")
+            return False
+        return True
+
+    err(f"[error] verify: 알 수 없는 에이전트 '{agent}'.")
+    return False
+
+
+def _verify_specs(target_agents, *, settings_override, home: Path):
+    """bootstrap verify 대상별 teammode on 인자와 격리 산출물 경로를 만든다."""
+    if settings_override is not None:
+        if target_agents:
+            specs = []
+            for agent in target_agents:
+                path = il.agent_settings_path(
+                    agent, home=home, settings_override=settings_override)
+                flag = "--settings" if agent == "claude" else "--config"
+                specs.append((agent, ["--agent", agent, flag, str(path)], path))
+            return specs
+        # 감지 agent 없음: 예전 verify-only settings 파일로 L1 marker/context 만 확인한다.
+        path = Path(settings_override) / "verify-settings.json"
+        return [("auto", ["--settings", str(path)], None)]
+
+    if target_agents:
+        return [(agent, ["--agent", agent, "--install"], None)
+                for agent in target_agents]
+    return [("auto", ["--install"], None)]
 
 
 def _resolve_root(opts_root) -> Path | None:
@@ -627,6 +685,13 @@ def bootstrap(opts: il.Options, *, home: Path, python_version,
 
     # ② detect ③ role
     det = _detect(team_root, home)
+    target_agents = det["agents"]
+    if opts.agent != "auto":
+        if opts.agent not in _VALID_AGENTS:
+            err(f"[error] --agent: 알 수 없는 에이전트 '{opts.agent}'. "
+                f"지원: {list(_VALID_AGENTS)}")
+            return 2
+        target_agents = [opts.agent]
     for w in pre.warnings:
         err(f"[warn] {w}")
     if not det["remote_authed"]:
@@ -641,7 +706,11 @@ def bootstrap(opts: il.Options, *, home: Path, python_version,
     # 계획 출력
     out(f"[plan] team_root={team_root}")
     out(f"[plan] role={role} (team.name 기본='{team_name_default}')")
-    out(f"[plan] agents={det['agents'] or '(없음)'}")
+    detected_label = det["agents"] or "(없음)"
+    if opts.agent == "auto":
+        out(f"[plan] agents={detected_label}")
+    else:
+        out(f"[plan] agents={target_agents} (--agent 명시, 감지값={detected_label})")
     out(f"[plan] member_name={member_name or '(미정)'}")
 
     if opts.dry_run:
@@ -689,7 +758,7 @@ def bootstrap(opts: il.Options, *, home: Path, python_version,
             "스캐폴드는 완료(메모리는 준비됨).")
         return 0
     wire = il.wire_agents(
-        det["agents"], home=home, settings_override=settings_override,
+        target_agents, home=home, settings_override=settings_override,
         run_adapter=_make_run_adapter(), team_root=team_root)
     for m in wire.messages:
         out(m)
@@ -728,21 +797,19 @@ def bootstrap(opts: il.Options, *, home: Path, python_version,
     else:
         out(f"[env] 셸 미감지 — 수동 설정 권장: {il.ENV_VAR}={team_root}")
 
-    # ⑦ verify (§4⑦·B1) — teammode on(배너+훅+active 마커) 후 context --json 으로
-    # L1 데이터가 읽히는지(수집 가능) 확인. ※ 실제 *맥락 주입*은 다음 세션 SessionStart
-    # 훅이 한다(여기 아님). context 는 기계 수집만 — 요약은 스킬 몫(--json 원자료까지).
-    # settings: 격리(--settings 디렉토리)면 그 하위 verify 파일, 실설치(--yes)면 --install.
-    # ※ settings_override 는 디렉토리(에이전트별 파일을 그 아래 둠) — 엔진 on 은 파일
-    #   경로를 받으므로 격리 모드에선 전용 verify settings 파일을 그 아래 만든다.
-    if settings_override is not None:
-        verify_flag = ["--settings",
-                       str(Path(settings_override) / "verify-settings.json")]
-    else:
-        verify_flag = ["--install"]
-    rc_on = _engine_call(["on", "--root", str(team_root)] + verify_flag)
-    if rc_on != 0:
-        err(f"[error] verify: teammode on 실패(rc={rc_on}).")
-        return 3
+    # ⑦ verify (§4⑦·B1) — 배선 대상 agent 의 실제 settings/config 파일로
+    # teammode on(배너+훅+active 마커)을 다시 적용한 뒤 context --json 으로 L1 데이터가
+    # 읽히는지 확인한다. ※ 실제 *맥락 주입*은 다음 세션 SessionStart 훅이 한다.
+    # 감지 agent 가 하나도 없으면 기존 verify-only settings 파일로 marker/context 만 확인한다.
+    for agent, verify_flags, artifact_path in _verify_specs(
+            target_agents, settings_override=settings_override, home=home):
+        rc_on = _engine_call(["on", "--root", str(team_root)] + verify_flags)
+        if rc_on != 0:
+            err(f"[error] verify: teammode on 실패(agent={agent}, rc={rc_on}).")
+            return 3
+        if settings_override is not None and artifact_path is not None:
+            if not _verify_agent_artifact(agent, Path(artifact_path), err):
+                return 3
     res_ctx = _engine_capture(["context", "--root", str(team_root), "--json"])
     if res_ctx.returncode != 0:
         err(f"[error] verify: teammode context 실패(rc={res_ctx.returncode}).")
@@ -761,16 +828,17 @@ def bootstrap(opts: il.Options, *, home: Path, python_version,
 # ─────────────────────────── 엔트리 ───────────────────────────
 
 _HELP_TEXT = """\
-usage: install.py [--root PATH] [--member-name NAME] [--role TEXT]
+usage: install.py [--root PATH] [--agent claude|codex|auto] [--member-name NAME] [--role TEXT]
                   [--settings PATH] [--yes] [--update] [--dry-run]
                   [--register-obsidian] [--obsidian-config PATH]
                   [--uninstall]
-                  [--<agent> sync|uninstall [--settings PATH] [--install]]
+                  [--<agent> sync|uninstall [--settings PATH|--config PATH] [--install]]
 
 teammode 결정적 부트스트랩 + 어댑터 디스패처.
 
 주요 플래그:
   --root PATH          팀 루트 경로 (필수; env 무신뢰)
+  --agent NAME         부트스트랩 배선 대상(auto|claude|codex). 명시값은 감지보다 우선
   --member-name NAME   세션로그 author 영문 이름
   --role TEXT          직책/직군 (예: 팀장/개발)
   --yes                실 ~/.claude/settings.json 배선 허용 (실설치)
@@ -783,7 +851,8 @@ teammode 결정적 부트스트랩 + 어댑터 디스패처.
 에이전트 디스패치 (예: --claude sync):
   --<agent> sync [--on|--off]   에이전트 훅 on/off
   --<agent> uninstall           에이전트 훅 제거
-  플래그로 --settings <격리경로> 또는 --install(실설치) 중 하나 필요.
+  플래그로 claude는 --settings <격리경로>, codex는 --config <격리경로>,
+  또는 --install(실설치) 중 하나 필요.
 
 자세한 내용: docs/spec/ 참조.
 """

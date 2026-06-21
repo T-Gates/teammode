@@ -1,6 +1,6 @@
 """처방 3 — codex adapter warn 도배 제거 (TDD).
 
-동일 이벤트(PreToolUse 미지원)에 대해 N개 항목이 warn을 발생시킬 때,
+synthetic events.json 이 어떤 이벤트를 미지원(null)으로 선언해 N개 warn을 발생시킬 때,
 N줄 반복 대신 묶어 1줄 요약으로 출력해야 한다.
 기존 [warn] + 스크립트명 포함 어설션은 여전히 통과해야 한다.
 """
@@ -33,7 +33,7 @@ def _events():
             "PostToolUse": "PostToolUse",
         },
         "actions": {"file_edit": "apply_patch"},
-        "mcp_tool_format": "{server}.{tool}",
+        "mcp_tool_format": "mcp__{server}__{tool}",
     }
 
 
@@ -74,8 +74,8 @@ def env(tmp_path):
 
 
 def test_multiple_pretooluse_warns_collapsed_to_one_line(env, capsys):
-    """PreToolUse 미지원으로 warn이 7개 발생할 때 출력 줄이 1줄이어야 한다."""
-    # confirm-action.py 가 7개의 PreToolUse 항목으로 등록된 상황 시뮬레이션
+    """미지원 이벤트 warn이 7개 발생할 때 출력 줄이 1줄이어야 한다."""
+    # synthetic events.json 에서 PreToolUse=null 인 상황 시뮬레이션
     manifest = [
         {
             "event": "PreToolUse",

@@ -102,6 +102,11 @@ triggers:
 
 `tm-connect`는 `tm-onboard`가 첫 가치 직후 제안한 L2 연결을 실제로 수행한다. 토큰 안내, 로컬 금고 저장, config 슬롯 기록, 재배선은 `tm-connect`의 책임이다.
 
+> **L2 legacy 경계 (2026-06-21):** 기존 `tm-connect` 문서 중 role slot,
+> `handlers/`, `role_server` 전제는 v0.2 이전 모델이다. L2의 다음 구현 방향은
+> provider MCP를 Claude/Codex 각 벤더 설정에 직접 등록하고 스킬이 표준 툴셋을 쓰는
+> 방식이다. L1 훅·세션로그·on/off는 계속 유지한다.
+
 ### 5.2 install.py ↔ tm-onboard 분업
 
 | 단계 | 주체 |
@@ -344,4 +349,3 @@ Common mistakes:
 | scratch repo가 uninstall로 사라진다고 봄 | 폴더는 남는다. 통째 정리는 별도 삭제다. |
 
 ---
-

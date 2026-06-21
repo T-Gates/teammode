@@ -1,4 +1,9 @@
-"""teammode MCP 서버 — stdlib JSON-RPC 2.0 over stdin/stdout.
+"""LEGACY teammode MCP 서버 — stdlib JSON-RPC 2.0 over stdin/stdout.
+
+2026-06-21 L2 설계 결정:
+    새 L2 방향은 role_server + handlers 역할 추상화가 아니라 벤더 MCP 직접 등록기다.
+    이 파일은 v0.2 이전 모델 보존/기존 테스트 호환용이며, 새 Codex/Claude L2 배선은
+    이 서버 위에 추가하지 않는다.
 
 실행:
     python -m infra.mcp.role_server --team <team> --handlers-dir /abs/path/handlers
@@ -244,7 +249,7 @@ JSONRPC_INTERNAL_ERROR = -32603
 class TeammodeMCPServer:
     """단일 teammode MCP 서버.
 
-    - alias: teammode (Claude: mcp__teammode__*, Codex: teammode.*)
+    - alias: teammode (Claude/Codex hook matcher: mcp__teammode__*)
     - 핸들러 lazy import: handlers_dir/<role>.py
     - JSON-RPC 2.0 over stdin/stdout
     """

@@ -2,20 +2,21 @@
 """teammode 엔진 CLI — 슬라이스 2 수직 슬라이스 (on/off 만 실배선).
 
 골든 시나리오(conformance/scenarios)의 인수 테스트를 GREEN으로 만들어가는 엔진.
-슬라이스 2에서는 on/off → Claude 어댑터 sync 배선 + 배너·상태 마커까지만 구현한다.
+슬라이스 2에서는 on/off → Claude/Codex 어댑터 sync 배선 + 배너·상태 마커까지 구현한다.
 context/issue/log 동사는 후속 슬라이스 (현재는 미구현 → 해당 시나리오 RED 유지).
 
-  teammode.py on  --root <팀루트> [--settings <경로>|--install]   팀 모드 켜기
-  teammode.py off --root <팀루트> [--settings <경로>|--install]   팀 모드 끄기
+  teammode.py on  --root <팀루트> [--settings <경로>|--config <경로>|--install] [--agent claude|codex]
+  teammode.py off --root <팀루트> [--settings <경로>|--config <경로>|--install] [--agent claude|codex]
 
 팀 루트는 **명시 인자 `--root`로만** 받는다. 환경변수(TEAMMODE_HOME 등)는 절대 읽지
 않는다 — ambient env 신뢰가 호스트 오염 사고의 근본 원인이었기 때문이다(P1, BUILD-LOG).
 `--root` 미지정 시 즉시 에러로 종료한다(정책 A): 엔진이 어느 폴더를 건드릴지 추측하지
 않게 하는 것이 사고의 근본 처방이다.
 
-settings 경로도 명시로만 받는다(P2): `--settings <경로>`(격리 모드) 또는 실설치를
-뜻하는 `--install`(→ ~/.claude/settings.json) 중 하나가 **필수**다. 둘 다 없으면 실
-`~/.claude`를 추측 오염하지 않도록 거부한다.
+settings/config 경로도 명시로만 받는다(P2): `--settings <경로>`(Claude 격리),
+`--config <경로>`(Codex 격리), 또는 실설치를 뜻하는 `--install` 중 하나가 **필수**다.
+`--install`은 홈에서 감지한 Claude/Codex를 모두 토글하고, `--agent`가 있으면 그 에이전트만
+토글한다. 아무 경로도 없으면 실 호스트 설정을 추측 오염하지 않도록 거부한다.
 """
 from __future__ import annotations
 
@@ -61,12 +62,46 @@ def default_banner_content(team_root: Path, team_name: str) -> str:
     return f"=== {team_name} ===\n"
 
 
-def _adapter(settings_path=None, skills_dir=None):
+_AGENT_HOME_DIRS = {"claude": ".claude", "codex": ".codex"}
+_AGENT_CONFIG = {
+    "claude": {
+        "settings_rel": ".claude/settings.json",
+        "settings_flag": "--settings",
+    },
+    "codex": {
+        "settings_rel": ".codex/config.toml",
+        "settings_flag": "--config",
+    },
+}
+
+
+def _detect_local_agents(home: Path | None = None) -> list[str]:
+    """홈의 에이전트 디렉토리 존재로 on/off 대상 에이전트를 감지한다."""
+    home = home or Path(os.path.expanduser("~"))
+    found = [
+        name for name, rel in _AGENT_HOME_DIRS.items()
+        if (home / rel).is_dir()
+    ]
+    return sorted(found)
+
+
+def _default_agent_settings(agent: str) -> str:
+    return str(Path(os.path.expanduser("~")) / _AGENT_CONFIG[agent]["settings_rel"])
+
+
+def _adapter(agent: str = "claude", settings_path=None, skills_dir=None):
     import runpy
-    mod = runpy.run_path(str(INFRA / "agents" / "claude" / "adapter.py"),
+    # 하위 호환: 기존 내부 호출은 _adapter(settings_path, skills_dir=...) 형태였다.
+    # 첫 인자가 agent 이름이 아니면 Claude settings_path 로 해석한다.
+    if agent not in _AGENT_CONFIG and settings_path is None:
+        settings_path = agent
+        agent = "claude"
+    if agent not in _AGENT_CONFIG:
+        raise ValueError(f"지원하지 않는 agent: {agent}")
+    mod = runpy.run_path(str(INFRA / "agents" / agent / "adapter.py"),
                          run_name="__teammode_engine__")
     Adapter = mod["Adapter"]
-    resolved_settings = settings_path or os.path.expanduser("~/.claude/settings.json")
+    resolved_settings = settings_path or _default_agent_settings(agent)
     # skills_dir 격리 파생(P0-1):
     #   명시 주입이 없으면 settings_path 의 부모 디렉토리 아래 "skills" 를 사용한다.
     #   규칙: <settings_path 부모>/skills
@@ -76,7 +111,7 @@ def _adapter(settings_path=None, skills_dir=None):
     if skills_dir is None:
         skills_dir = str(Path(resolved_settings).parent / "skills")
     return Adapter(
-        agent_dir=str(INFRA / "agents" / "claude"),
+        agent_dir=str(INFRA / "agents" / agent),
         manifest_path=str(INFRA / "hooks" / "manifest.json"),
         settings_path=resolved_settings,
         # 어댑터의 team_root = 설치 위치(normalize.py 소유 마커 기준). 메모리 쓰기의
@@ -275,21 +310,11 @@ def auto_update_on_start(team_root: Path) -> None:
         pass
 
 
-def cmd_on(team_root: Path, settings_path: str, member: str | None = None,
-           skills_dir: str | None = None) -> int:
-    _print_fenced_banner(team_root)
-    # 시작 멘트(greeting): 배너 직후, config 에 있으면 출력(없으면 미출력 — §3.1).
-    greeting = _read_team_field(team_root, "greeting")
-    if greeting:
-        print(greeting)
-    # 단일 금고 전환(2026-06-21) 전에 팀명-키로 저장한 L2 토큰을 default.json 으로 1회 이전.
-    _migrate_legacy_credentials(team_root)
-    # D: upstream 자동 동기화(fetch + 변경 시 자동 커밋). 실패는 on 을 막지 않는다.
-    # 순서: auto_update 먼저 → 그 다음 심링크 토글(새 core 스킬 반영 위해).
-    auto_update_on_start(team_root)
-    adapter = _adapter(settings_path, skills_dir=skills_dir)
+def _sync_on_agent(team_root: Path, agent: str, settings_path: str,
+                   member: str | None = None,
+                   skills_dir: str | None = None) -> None:
+    adapter = _adapter(agent, settings_path, skills_dir=skills_dir)
     adapter.sync(mode="on")
-    _active_marker(team_root).write_text("", encoding="utf-8")
     # core 스킬 설치 (tm-context 등 — on 시 활성)
     adapter.install_skills(layer="core")
     # 멤버별 util 스킬 설치 (--member 지정 시)
@@ -310,6 +335,38 @@ def cmd_on(team_root: Path, settings_path: str, member: str | None = None,
                 continue
             target = adapter.skills_dir / skill_name
             adapter._link_one_skill(src, target, layer="util")
+
+
+def cmd_on(team_root: Path, settings_path: str, member: str | None = None,
+           skills_dir: str | None = None, agent: str = "claude") -> int:
+    _print_fenced_banner(team_root)
+    # 시작 멘트(greeting): 배너 직후, config 에 있으면 출력(없으면 미출력 — §3.1).
+    greeting = _read_team_field(team_root, "greeting")
+    if greeting:
+        print(greeting)
+    # 단일 금고 전환(2026-06-21) 전에 팀명-키로 저장한 L2 토큰을 default.json 으로 1회 이전.
+    _migrate_legacy_credentials(team_root)
+    # D: upstream 자동 동기화(fetch + 변경 시 자동 커밋). 실패는 on 을 막지 않는다.
+    # 순서: auto_update 먼저 → 그 다음 심링크 토글(새 core 스킬 반영 위해).
+    auto_update_on_start(team_root)
+    _sync_on_agent(team_root, agent, settings_path, member=member, skills_dir=skills_dir)
+    _active_marker(team_root).write_text("", encoding="utf-8")
+    return 0
+
+
+def cmd_on_agents(team_root: Path, targets: list[tuple[str, str]],
+                  member: str | None = None,
+                  skills_dir: str | None = None) -> int:
+    _print_fenced_banner(team_root)
+    greeting = _read_team_field(team_root, "greeting")
+    if greeting:
+        print(greeting)
+    _migrate_legacy_credentials(team_root)
+    auto_update_on_start(team_root)
+    for agent, settings_path in targets:
+        _sync_on_agent(team_root, agent, settings_path, member=member,
+                       skills_dir=skills_dir)
+    _active_marker(team_root).write_text("", encoding="utf-8")
     return 0
 
 
@@ -441,19 +498,36 @@ def _write_util_skills(team_root: Path, member: str, skills: list) -> None:
         raise
 
 
-def cmd_off(team_root: Path, settings_path: str, member: str | None = None,
-            skills_dir: str | None = None) -> int:
-    adapter = _adapter(settings_path, skills_dir=skills_dir)
+def _sync_off_agent(agent: str, settings_path: str,
+                    skills_dir: str | None = None) -> None:
+    adapter = _adapter(agent, settings_path, skills_dir=skills_dir)
     adapter.sync(mode="off")
+    _uninstall_layer(adapter, "core")
+    _uninstall_layer(adapter, "util")
+
+
+def cmd_off(team_root: Path, settings_path: str, member: str | None = None,
+            skills_dir: str | None = None, agent: str = "claude") -> int:
+    _sync_off_agent(agent, settings_path, skills_dir=skills_dir)
     marker = _active_marker(team_root)
     if marker.exists():
         marker.unlink()
-    # core/util 스킬 제거
-    _uninstall_layer(adapter, "core")
-    _uninstall_layer(adapter, "util")
     # OFF 출력 순서: 펜스 배너 → farewell (ON 과 동일 배너 소스 사용).
     _print_fenced_banner(team_root)
     # 끝맺음 말(farewell): config 에 있으면 그걸, 없으면 "상태 저장됨" 폴백(§3.1).
+    farewell = _read_team_field(team_root, "farewell")
+    print(farewell if farewell else "teammode off — 상태 저장됨")
+    return 0
+
+
+def cmd_off_agents(team_root: Path, targets: list[tuple[str, str]],
+                   skills_dir: str | None = None) -> int:
+    for agent, settings_path in targets:
+        _sync_off_agent(agent, settings_path, skills_dir=skills_dir)
+    marker = _active_marker(team_root)
+    if marker.exists():
+        marker.unlink()
+    _print_fenced_banner(team_root)
     farewell = _read_team_field(team_root, "farewell")
     print(farewell if farewell else "teammode off — 상태 저장됨")
     return 0
@@ -677,7 +751,8 @@ def cmd_util(team_root: Path, action: str | None, member: str | None,
 # 값을 받는 옵션 플래그 화이트리스트. 여기 없는 `--flag` 는 부울/무시로 다룬다 —
 # 알 수 없는 플래그의 다음 토큰을 값으로 삼키지 않게 해 verb 손실을 막는다(§3:366).
 # issue 동사의 정규 입력 필드(--title/--body/--assignee/--label/--priority)도 값 플래그.
-_VALUE_FLAGS = ("--root", "--settings", "--author", "--text", "--now", "--message",
+_VALUE_FLAGS = ("--root", "--settings", "--config", "--agent",
+                "--author", "--text", "--now", "--message",
                 "--title", "--body", "--assignee", "--label", "--priority", "--paths",
                 "--member", "--skills-dir", "--skill",
                 # knowledge 동사 플래그
@@ -1660,6 +1735,10 @@ def _parse_args(argv):
             opts[a.lstrip("-")] = next(it, None)
         elif a == "--install":
             opts["install"] = True
+        elif a == "--claude":
+            opts["agent"] = "claude"
+        elif a == "--codex":
+            opts["agent"] = "codex"
         elif a == "--json":
             opts["json"] = True
         elif a == "--push":
@@ -1689,6 +1768,65 @@ def _resolve_settings(settings_path, install) -> str:
         return settings_path
     if install:
         return os.path.expanduser("~/.claude/settings.json")
+    return None
+
+
+def _resolve_agent_settings(agent: str, opts: dict) -> str | None:
+    """on/off 대상 agent 의 settings/config 경로를 명시 인자에서만 해석한다."""
+    if agent == "claude":
+        return _resolve_settings(opts.get("settings"), opts["install"])
+
+    if agent == "codex":
+        if opts.get("config"):
+            return opts["config"]
+        settings = opts.get("settings")
+        if settings:
+            p = Path(settings)
+            # `--settings <dir>` 는 에이전트별 격리 루트로 해석한다. 기존
+            # `--settings <파일>` 단독은 Claude 레거시 경로라 여기까지 오지 않는다.
+            if p.suffix == ".toml":
+                return str(p)
+            if p.suffix:
+                return str(p.parent / "codex" / "config.toml")
+            return str(p / "codex" / "config.toml")
+        if opts["install"]:
+            return _default_agent_settings("codex")
+    return None
+
+
+def _resolve_onoff_targets(opts: dict) -> list[tuple[str, str]] | None:
+    """on/off 가 토글할 (agent, settings_path) 목록.
+
+    정책:
+      - --agent/--claude/--codex 명시: 감지 여부보다 우선해 그 에이전트만.
+      - --config 단독: Codex 단일 대상.
+      - --settings <파일> 단독: 기존 Claude 격리 동작 유지.
+      - --install: 홈에서 감지된 에이전트 모두, 없으면 Claude 폴백.
+    """
+    explicit = opts.get("agent")
+    if explicit:
+        if explicit not in _AGENT_CONFIG:
+            print(f"[error] --agent: 알 수 없는 에이전트 '{explicit}'. "
+                  f"지원: {list(_AGENT_CONFIG)}", file=sys.stderr)
+            return []
+        settings = _resolve_agent_settings(explicit, opts)
+        return [(explicit, settings)] if settings else None
+
+    if opts.get("config") and not opts.get("settings"):
+        return [("codex", opts["config"])]
+
+    if opts.get("settings") and not opts["install"]:
+        return [("claude", opts["settings"])]
+
+    if opts["install"]:
+        agents = _detect_local_agents() or ["claude"]
+        targets = []
+        for agent in agents:
+            settings = _resolve_agent_settings(agent, opts)
+            if settings:
+                targets.append((agent, settings))
+        return targets
+
     return None
 
 
@@ -1796,11 +1934,14 @@ def main(argv=None) -> int:
             date_str=opts.get("date"),
         )
 
-    # on/off: P2 settings 경로도 명시로만. 둘 다 없으면 실 ~/.claude 추측 오염 거부.
-    resolved_settings = _resolve_settings(opts.get("settings"), opts["install"])
-    if resolved_settings is None:
-        print("[error] --settings <경로> (격리 모드) 또는 --install (실설치) 중 "
-              "하나가 필요합니다. 명시 없이 실 ~/.claude/settings.json 에 쓰지 않습니다.",
+    # on/off: settings/config 경로도 명시로만. 둘 다 없으면 실호스트 추측 오염 거부.
+    targets = _resolve_onoff_targets(opts)
+    if targets == []:
+        return 2
+    if targets is None:
+        print("[error] --settings <경로> / --config <경로> (격리 모드) 또는 "
+              "--install (실설치) 중 하나가 필요합니다. 명시 없이 실 호스트 설정에 "
+              "쓰지 않습니다.",
               file=sys.stderr)
         return 2
 
@@ -1811,10 +1952,17 @@ def main(argv=None) -> int:
             if err is not None:
                 print(f"[error] --member: {err}", file=sys.stderr)
                 return 2
-        return cmd_on(team_root, resolved_settings, member=member,
-                      skills_dir=opts.get("skills-dir"))
-    return cmd_off(team_root, resolved_settings, member=opts.get("member"),
-                   skills_dir=opts.get("skills-dir"))
+        if len(targets) == 1:
+            agent, settings_path = targets[0]
+            return cmd_on(team_root, settings_path, member=member,
+                          skills_dir=opts.get("skills-dir"), agent=agent)
+        return cmd_on_agents(team_root, targets, member=member,
+                             skills_dir=opts.get("skills-dir"))
+    if len(targets) == 1:
+        agent, settings_path = targets[0]
+        return cmd_off(team_root, settings_path, member=opts.get("member"),
+                       skills_dir=opts.get("skills-dir"), agent=agent)
+    return cmd_off_agents(team_root, targets, skills_dir=opts.get("skills-dir"))
 
 
 if __name__ == "__main__":

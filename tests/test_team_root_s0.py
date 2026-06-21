@@ -45,7 +45,7 @@ def _scaffold_team_root(tmp_path):
     }))
     (root / "infra" / "agents" / "codex" / "events.json").write_text(json.dumps({
         "agent": "codex", "config_file": "~/.codex/config.toml",
-        "events": {}, "actions": {}, "mcp_tool_format": "{server}.{tool}",
+        "events": {}, "actions": {}, "mcp_tool_format": "mcp__{server}__{tool}",
     }))
     (root / "infra" / "agents" / "claude" / "normalize.py").write_text("# stub\n")
     (root / "infra" / "agents" / "codex" / "normalize.py").write_text("# stub\n")
@@ -166,7 +166,7 @@ def test_codex_adapter_team_root_param_overrides_default(tmp_path):
     hooks_dir.mkdir(parents=True)
     (agent_dir / "events.json").write_text(json.dumps({
         "agent": "codex", "config_file": "~/.codex/config.toml",
-        "events": {}, "actions": {}, "mcp_tool_format": "{server}.{tool}",
+        "events": {}, "actions": {}, "mcp_tool_format": "mcp__{server}__{tool}",
     }))
     (hooks_dir / "manifest.json").write_text("[]")
     ad = Adapter(

@@ -175,6 +175,7 @@ def test_wire_requires_run_adapter():
 import json  # noqa: E402
 import runpy  # noqa: E402
 import subprocess  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
 
 INSTALL_PY = REPO / "infra" / "install.py"
 
@@ -208,6 +209,68 @@ def test_bootstrap_wires_detected_agent_isolated(tmp_path):
     assert "hooks" in data
     # SessionStart 등 manifest 훅 등록 + normalize 경유
     assert "normalize.py" in json.dumps(data)
+
+
+def test_bootstrap_agent_option_overrides_detection(tmp_path):
+    """--agent codex 명시 시 홈 감지값보다 명시 에이전트를 배선한다."""
+    team = tmp_path / "team"
+    team.mkdir()
+    _git_init(team)
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)  # 감지는 claude 지만
+    iso = tmp_path / "iso"
+    mod = _load_install()
+    opts = il.parse_args([
+        "--root", str(team),
+        "--settings", str(iso),
+        "--agent", "codex",
+    ])
+    rc = mod["bootstrap"](opts, home=home, python_version=(3, 13))
+    assert rc == 0
+    assert (iso / "codex" / "config.toml").is_file()
+    assert not (iso / "claude" / "settings.json").exists()
+
+
+def test_bootstrap_codex_isolated_verify_uses_codex_config(tmp_path):
+    """--agent codex + --settings 격리 verify 는 Codex config.toml 을 명시 검증한다."""
+    team = tmp_path / "team"
+    team.mkdir()
+    _git_init(team)
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)  # 감지는 claude 여도 --agent codex 가 우선
+    iso = tmp_path / "iso"
+    mod = _load_install()
+    calls = []
+
+    def fake_engine_call(argv):
+        calls.append(list(argv))
+        return 0
+
+    def fake_engine_capture(argv):
+        assert argv == ["context", "--root", str(team), "--json"]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"state": "on", "members": []}),
+        )
+
+    mod["bootstrap"].__globals__["_engine_call"] = fake_engine_call
+    mod["bootstrap"].__globals__["_engine_capture"] = fake_engine_capture
+    opts = il.parse_args([
+        "--root", str(team),
+        "--settings", str(iso),
+        "--agent", "codex",
+    ])
+    rc = mod["bootstrap"](opts, home=home, python_version=(3, 13))
+
+    assert rc == 0
+    assert calls == [[
+        "on", "--root", str(team),
+        "--agent", "codex",
+        "--config", str(iso / "codex" / "config.toml"),
+    ]]
+    flat_calls = "\n".join(" ".join(c) for c in calls)
+    assert "verify-settings.json" not in flat_calls
+    assert "--settings" not in flat_calls
 
 
 def test_bootstrap_no_agents_still_ok(tmp_path):
