@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -179,33 +180,36 @@ def _read_key() -> str:
     old = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
-        ch = sys.stdin.read(1)
-        if ch == "":           # EOF(Ctrl-D) — 빈 read. 무한루프 방어를 위해 명시 처리.
+        ch = os.read(fd, 1)    # 버퍼링 없는 raw 바이트(sys.stdin.read 는 버퍼링 → select 와 불일치)
+        if ch == b"":          # EOF(Ctrl-D) — 빈 read. 무한루프 방어.
             return "eof"
-        if ch == "\x03":       # Ctrl-C
+        if ch == b"\x03":      # Ctrl-C
             return "abort"
-        if ch == "\x04":       # Ctrl-D (raw 에선 문자로 옴)
+        if ch == b"\x04":      # Ctrl-D
             return "eof"
-        if ch in ("\r", "\n"):
+        if ch in (b"\r", b"\n"):
             return "enter"
-        if ch == " ":
+        if ch == b" ":
             return "space"
-        if ch == "\x1b":       # ESC 시퀀스(화살표 \x1b[A 등). ESC 단독 블로킹 방지(select 가드).
+        if ch == b"\x1b":      # ESC 시퀀스(화살표). os fd 라 select 가드가 정합(ESC 단독 블로킹 방지).
             import select
-            r, _, _ = select.select([sys.stdin], [], [], 0.05)
+            r, _, _ = select.select([fd], [], [], 0.05)
             if not r:
-                return "esc"   # 추가 바이트 없음 = ESC 단독 → 블로킹 회피
-            seq = sys.stdin.read(2)
-            if seq == "[A":
+                return "esc"
+            seq = os.read(fd, 2)
+            if seq == b"[A":
                 return "up"
-            if seq == "[B":
+            if seq == b"[B":
                 return "down"
-            if seq == "[C":
+            if seq == b"[C":
                 return "right"
-            if seq == "[D":
+            if seq == b"[D":
                 return "left"
             return "esc"
-        return ch
+        try:
+            return ch.decode("utf-8", "ignore")   # j/k/q 등 일반 키
+        except Exception:  # noqa: BLE001
+            return ""
     finally:
         try:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
@@ -219,19 +223,19 @@ def _render_menu(title: str, hint: str, lines: list[str], cursor: int,
 
     lines: 항목 텍스트(커서/마크 제외). cursor: 현재 커서 인덱스.
     """
-    total = len(lines) + 2  # title + hint
+    # title 이 빈 문자열이면 title 줄을 출력하지 않는다(헤더 중복 방지).
+    # 그 경우 redraw 줄 수(total)도 hint + 항목만큼만 잡아야 raw 가 어긋나지 않는다.
+    show_title = title != ""
+    total = len(lines) + (2 if show_title else 1)  # (title +) hint + 항목
     if not first:
         # 커서를 위로 total 줄 올리고 각 줄을 지운다.
         sys.stdout.write(f"\x1b[{total}A")
-    out = [_hi(title), _dim(hint)]
+    if show_title:
+        sys.stdout.write("\x1b[2K" + _hi(title) + "\n")
+    sys.stdout.write("\x1b[2K" + _dim(hint) + "\n")
     for i, ln in enumerate(lines):
         prefix = _hi("❯ ") if i == cursor else "  "
-        out.append(f"\x1b[2K{prefix}{ln}")
-    # title/hint 줄도 지움 처리
-    sys.stdout.write("\x1b[2K" + out[0] + "\n")
-    sys.stdout.write("\x1b[2K" + out[1] + "\n")
-    for ln in out[2:]:
-        sys.stdout.write(ln + "\n")
+        sys.stdout.write(f"\x1b[2K{prefix}{ln}\n")
     sys.stdout.flush()
 
 
@@ -294,6 +298,7 @@ def _pick_one(title: str, hint: str, choices: list[str],
 def _pick_many(title: str, hint: str, choices: list[str],
                *, selected: list[int] | None = None,
                disabled: set[int] | None = None,
+               min_select: int = 0,
                fallback: "callable | None" = None) -> list[int]:
     """복수 선택(체크박스 ◉/◯ 토글). 선택된 인덱스 리스트 반환.
 
@@ -339,7 +344,9 @@ def _pick_many(title: str, hint: str, choices: list[str],
                     else:
                         sel.add(cursor)
             elif key == "enter":
-                return sorted(sel)
+                if len(sel) >= min_select:
+                    return sorted(sel)
+                # min_select 미달 → Enter 무시(최소 선택 강제). 메뉴 유지.
             elif key in ("abort", "eof"):
                 raise KeyboardInterrupt  # Ctrl-C/D = 취소 → main 이 130 종료
     finally:
@@ -358,25 +365,26 @@ def _ask_text(label: str, default: str | None = None) -> str:
     """
     if not sys.stdin.isatty():
         return default or ""
-    if default and _raw_capable():
+    # prefill(편집 가능 기본값)은 GNU readline 전용. macOS libedit(editline)은
+    # insert_text/pre_input_hook 가 안 먹어 → _prompt 로 폴백해 기본값([default])을 보여준다.
+    if default:
         try:
-            import readline  # stdlib — 일부 빌드에서 ImportError 가능
+            import readline
         except ImportError:
-            return _prompt(label, default)
+            readline = None
+        if readline is not None and getattr(readline, "backend", "") == "readline":
+            def _hook():
+                readline.insert_text(default)
+                readline.redisplay()
 
-        def _hook():
-            readline.insert_text(default)
-            readline.redisplay()
-
-        readline.set_pre_input_hook(_hook)
-        try:
-            val = input(f"{label}: ").strip()
-        except EOFError:
-            val = ""
-        finally:
-            readline.set_pre_input_hook(None)
-        return val or default
-    # default 없거나 raw 불가 → 기존 동작
+            readline.set_pre_input_hook(_hook)
+            try:
+                val = input(f"{label}: ").strip()
+            except EOFError:
+                val = ""
+            finally:
+                readline.set_pre_input_hook(None)
+            return val or default
     return _prompt(label, default)
 
 
@@ -504,28 +512,33 @@ def _done(repo_dir: Path, *, created: bool = False, url: str | None = None) -> N
     url 이 주어지면(init·join 공통) **①팀원 초대 명령(url 포함) ②tm-onboard 실행**을
     둘 다 _hi 강조 + 박스로 보여준다 — 순수 join 합류자도 '다른 팀원 부를 url' 을 보게 됨.
     """
+    team_name = _read_team_name(repo_dir) or repo_dir.name
     print()
-    print(_ok(f"팀 {'생성' if created else '합류'} 완료") + f"  {repo_dir}")
+    print()
+    print(_ok(f"🎉 {team_name} 팀 {'생성' if created else '합류'} 완료") + f"  {repo_dir}")
+    print()
+    print(f"당신의 에이전트에 {_hi('팀 모드')}가 생겼어요 — 켜는 동안 팀원 전체가")
+    print("맥락을 공유하고, 팀 메모리를 함께 관리해요.")
 
     bar = "─" * 58
-    # ① 팀원 초대 (url 있을 때만 — 비대화 폴백 등에서 url 누락 시 생략).
+    # ① 팀 모드 켜기 — 지금 할 행동이라 맨 위.
+    print()
+    print(bar)
+    print("  " + _hi("① 팀 모드 켜기"))
+    print("     " + _ok("설치가 끝났습니다!") + "  아직 팀 모드는 꺼져 있어요.")
+    print("     에이전트를 열고 " + _hi("/tm-onboard") + " 를 실행하세요.")
+    print("     설치 검증과 팀 모드 활성화가 자동으로 진행됩니다.")
+    print(bar)
+
+    # ② 팀원 초대 (url 있을 때만) — 명령이 길어 시선 분산되니 맨 아래.
     if url:
         print()
-        print("┌" + bar + "┐")
-        print("  " + _hi("① 팀원 초대") + " — 아래 명령 중 하나를 공유하세요 (pip·curl 동일):")
+        print(bar)
+        print("  ② 팀원 초대 — 아래 명령 중 하나를 공유하세요 (pip·curl 동일):")
         print()
         for line in _invite_lines(url):
-            print("  " + _hi(line))
-        print("└" + bar + "┘")
-
-    # ② tm-onboard (활성화).
-    print()
-    print("┌" + bar + "┐")
-    print("  " + _hi("② 팀모드 켜기") + " — 설치는 끝났지만 팀모드는 아직 꺼져 있습니다.")
-    print(f"     {repo_dir} 에서 Claude Code 또는 Codex를 열고")
-    print('     ' + _hi('"tm-onboard"') + ' 또는 ' + _hi('"팀모드 켜"') + ' 라고 입력하면')
-    print("     검증 · 브리핑 · 활성화가 자동으로 진행됩니다.")
-    print("└" + bar + "┘")
+            print("  " + line)
+        print(bar)
 
 
 def cmd_init(args) -> int:
@@ -633,8 +646,22 @@ def _parse_members_md(members_file: Path) -> list[str]:
     return names
 
 
+def _read_team_name(dest: Path) -> str | None:
+    """clone 된 dest/team.config.json 에서 team.name 을 읽는다.
+
+    파일 없음·JSON 깨짐·필드 없음 등 어떤 실패에도 **raise 하지 않고** None 반환.
+    """
+    try:
+        cfg = json.loads((dest / "team.config.json").read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — 읽기 실패는 조용히 폴백
+        return None
+    team = cfg.get("team") if isinstance(cfg, dict) else None
+    name = team.get("name") if isinstance(team, dict) else None
+    return name if isinstance(name, str) and name.strip() else None
+
+
 def _wizard_join(url: str, args, clone_fn=None) -> tuple[Path, str | None, list[str], bool]:
-    """TTY 대화형 join wizard 8단계. (dest, member, extra_args, clone_skip) 반환.
+    """TTY 대화형 join wizard 5단계 + 최종 확인. (dest, member, extra_args, clone_skip) 반환.
 
     clone_fn: 선택적 콜백 `(url, dest) -> bool`. 단계1·2 확정 후, 단계3(members.md 읽기)
       전에 호출한다. True 반환 시 clone 성공, False 시 오류 처리. None 이면 clone 건너뜀
@@ -644,7 +671,7 @@ def _wizard_join(url: str, args, clone_fn=None) -> tuple[Path, str | None, list[
     """
     home = Path.home()
 
-    print("팀에 합류합니다 — 5단계예요.\n")
+    print("팀 레포를 설정합니다 (5단계 + 확인)\n")
 
     while True:  # 7단계에서 n → 전체 재시작
         # ── 1단계: 설치 위치 ──────────────────────────────────────────────
@@ -665,7 +692,7 @@ def _wizard_join(url: str, args, clone_fn=None) -> tuple[Path, str | None, list[
                     c = _prompt("  1) 다른 위치 입력   2) 기존 폴더에 재설치 [1/2]", "1")
                     return 1 if c.strip() == "2" else 0
                 pick = _pick_one(
-                    "기존 폴더 처리", "(↑↓ 이동 · Enter 확정)",
+                    "", "(↑↓ 이동 · Enter 확정)",
                     ["다른 위치 입력", "기존 폴더에 재설치 (clone 건너뜀)"],
                     default_index=0, fallback=_dir_fallback)
                 if pick == 1:
@@ -719,10 +746,13 @@ def _wizard_join(url: str, args, clone_fn=None) -> tuple[Path, str | None, list[
 
         disabled_idx = {i for i, ag in enumerate(all_agents) if ag not in installed}
         sel_idx = _pick_many(
-            "에이전트 선택", "(↑↓ 이동 · 스페이스 토글 · Enter 확정 · 미설치=선택 불가)",
+            "",
+            "(↑↓ 이동 · 스페이스 토글 · Enter 확정 · 미설치=선택 불가"
+            + (" · 최소 1개)" if installed else ")"),
             all_agents,
             selected=[i for i, ag in enumerate(all_agents) if ag in selected_agents],
-            disabled=disabled_idx, fallback=_agents_fallback)
+            disabled=disabled_idx, min_select=(1 if installed else 0),
+            fallback=_agents_fallback)
         selected_agents = [all_agents[i] for i in sel_idx]
 
         # ── clone (단계 2.5): members.md 읽기 전에 실행 → 기존멤버 목록 정확하게 읽힘 ──
@@ -745,7 +775,7 @@ def _wizard_join(url: str, args, clone_fn=None) -> tuple[Path, str | None, list[
             c = _prompt("  1) 새로 합류   2) 기존 팀원  ›", "1")
             return 1 if c.strip() == "2" else 0
         kind = _pick_one(
-            "멤버 종류", "(↑↓ 이동 · Enter 확정)",
+            "", "(↑↓ 이동 · Enter 확정)",
             ["새로 합류", "기존 팀원"], default_index=0,
             fallback=_member_kind_fallback)
         is_new = kind != 1
@@ -777,7 +807,7 @@ def _wizard_join(url: str, args, clone_fn=None) -> tuple[Path, str | None, list[
                         return 0
                     return idx if 0 <= idx < len(existing_members) else 0
                 pick = _pick_one(
-                    "기존 팀원 선택", "(↑↓ 이동 · Enter 확정)",
+                    "", "(↑↓ 이동 · Enter 확정)",
                     existing_members, default_index=0, fallback=_existing_fallback)
                 member = existing_members[pick] if 0 <= pick < len(existing_members) \
                     else existing_members[0]
@@ -804,6 +834,7 @@ def _wizard_join(url: str, args, clone_fn=None) -> tuple[Path, str | None, list[
         # ── 요약 확인 ─────────────────────────────────────────────────────
         print()
         print("── 설치 요약 ─────────────────────────────────────")
+        print(f"  팀        : {url}")
         print(f"  위치      : {dest}")
         print(f"  에이전트  : {', '.join(selected_agents) if selected_agents else '(없음)'}")
         print(f"  이름      : {member or '(미지정)'}")
@@ -915,6 +946,7 @@ def main(argv=None) -> int:
         return args.func(args)
     except KeyboardInterrupt:
         print()
+        print(_warn("취소됐습니다."))
         return 130
 
 
