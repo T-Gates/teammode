@@ -159,6 +159,51 @@ def test_resolve_server_alias_prefixes_tm(tmp_path):
     assert ad.resolve_server_alias("tm-linear") == "tm-linear"
 
 
+# ────────────── 공식 호스티드 HTTP MCP 실등록 (issue #20) ──────────────
+
+NOTION_CONNECTED = {"docs": {"provider": "notion", "scope": "team",
+                            "database_id": "db1"}}
+SLACK_CONNECTED = {"chat": {"provider": "slack", "scope": "team",
+                           "channel_id": "C1"}}
+
+
+def test_claude_install_mcp_notion_registers_http(tmp_path):
+    # notion 은 공식 호스티드 MCP → claude http shape({type:http,url})로 실등록.
+    root = _scaffold(tmp_path, NOTION_CONNECTED)
+    out = _claude(root, tmp_path).install_mcp()
+    entry = json.loads(Path(tmp_path / "settings.claude.json").read_text())[
+        "mcpServers"]["tm-notion"]
+    assert entry["type"] == "http"
+    assert entry["url"] == "https://mcp.notion.com/mcp"
+    assert entry["_teammode_managed"] is True
+    assert entry["_canonical_server"] == "notion"
+    assert "command" not in entry  # 추측 기동 커맨드 박지 않음
+    assert any("호스티드" in c for c in out)
+
+
+def test_codex_install_mcp_notion_registers_http_url(tmp_path):
+    # codex 는 streamable HTTP → [mcp_servers.tm-notion] 에 url 라인.
+    root = _scaffold(tmp_path, NOTION_CONNECTED)
+    out = _codex(root, tmp_path).install_mcp()
+    toml = Path(tmp_path / "codex.config.toml").read_text()
+    assert "[mcp_servers.tm-notion]" in toml
+    assert "url = 'https://mcp.notion.com/mcp'" in toml
+    assert "command =" not in toml  # 호스티드는 기동 커맨드 미기재
+    assert any("호스티드" in c for c in out)
+
+
+def test_claude_install_mcp_slack_placeholder_with_manual_guidance(tmp_path):
+    # slack 은 공식 호스티드 URL 없음 → placeholder(자리만) + 수동 등록 안내 메시지.
+    root = _scaffold(tmp_path, SLACK_CONNECTED)
+    out = _claude(root, tmp_path).install_mcp()
+    entry = json.loads(Path(tmp_path / "settings.claude.json").read_text())[
+        "mcpServers"]["tm-slack"]
+    assert entry["_teammode_managed"] is True
+    assert "type" not in entry and "url" not in entry and "command" not in entry
+    # 죽은 자리만 두되, 직접 붙여야 동작함을 수동 명령으로 안내.
+    assert any("claude mcp add slack" in c for c in out)
+
+
 # ────────────── 빈 슬롯 sync 교정 — [info] 생략 (L1 기존 미준수 교정) ──────────────
 
 def test_sync_empty_slot_omits_mcp_matcher_with_info(tmp_path, capsys):
