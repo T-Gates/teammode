@@ -164,6 +164,12 @@ def validate_pack(data, *, expected_name: str | None = None) -> ProviderPack:
         _require(mcp["transport"] in VALID_MCP_TRANSPORT,
                  f"mcp.transport 는 {sorted(VALID_MCP_TRANSPORT)} 중 하나여야 합니다 "
                  f"(받음: {mcp['transport']!r}).")
+        # transport=="http" 는 호스티드 엔드포인트가 본질 — url 없으면 무의미(등록 시
+        # placeholder 로 빠져 조용히 비동작). 추측 대신 명시 거부(codex review P2-b).
+        if mcp["transport"] == "http":
+            _require(isinstance(mcp.get("url"), str) and mcp.get("url", "").strip(),
+                     "mcp.transport=='http' 이면 mcp.url(호스티드 MCP 엔드포인트)이 "
+                     "필수입니다.")
 
     return ProviderPack(
         provider=provider,

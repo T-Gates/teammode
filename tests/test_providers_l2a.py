@@ -238,6 +238,14 @@ def test_mcp_url_empty_rejected():
         P.validate_pack(data, expected_name="notion")
 
 
+def test_mcp_transport_http_requires_url():
+    # codex review P2-b: transport=http 인데 url 없으면 reject(endpoint 없으면 무의미).
+    data = dict(_GOOD_PACK)
+    data["mcp"] = {"source": "official", "transport": "http", "register_hint": "h"}
+    with pytest.raises(P.ProviderValidationError, match="url"):
+        P.validate_pack(data, expected_name="notion")
+
+
 def test_mcp_url_optional():
     # transport/url 없어도(register_hint 만) valid — 전부 선택.
     data = dict(_GOOD_PACK)

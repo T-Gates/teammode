@@ -200,8 +200,12 @@ def test_claude_install_mcp_slack_placeholder_with_manual_guidance(tmp_path):
         "mcpServers"]["tm-slack"]
     assert entry["_teammode_managed"] is True
     assert "type" not in entry and "url" not in entry and "command" not in entry
-    # 죽은 자리만 두되, 직접 붙여야 동작함을 수동 명령으로 안내.
-    assert any("claude mcp add slack" in c for c in out)
+    # codex review P2-a: 안내는 관리 별칭(tm-slack) 기준 + placeholder 가 연결 안 됨을
+    # 정직하게. provider 명(slack)으로 add 하라고 하면 별개 서버 생겨 불일치/오해.
+    msg = " ".join(out)
+    assert "claude mcp add tm-slack" in msg          # 관리 별칭으로 안내
+    assert "claude mcp add slack -- " not in msg     # provider 명 단독 안내 금지
+    assert "연결되지 않" in msg                       # placeholder 비동작 정직 표면화
 
 
 # ────────────── 빈 슬롯 sync 교정 — [info] 생략 (L1 기존 미준수 교정) ──────────────
@@ -447,7 +451,7 @@ def test_claude_install_mcp_no_launch_data_is_placeholder(tmp_path):
     assert "command" not in entry                        # 추측 커맨드 없음
     assert entry["_teammode_managed"] is True
     assert entry["_register_hint"] == "테스트 팩"
-    assert any("자리만" in c for c in out)
+    assert any("연결되지 않" in c for c in out)  # placeholder 비동작 정직 표면화(P2-a)
 
 
 def test_codex_install_mcp_reflects_official_command(tmp_path):
@@ -475,7 +479,7 @@ def test_codex_install_mcp_no_launch_data_is_placeholder(tmp_path):
     assert "[mcp_servers.tm-linear]" in txt
     assert "command =" not in txt                        # 추측 커맨드 없음
     assert "_register_hint = '테스트 팩'" in txt
-    assert any("자리만" in c for c in out)
+    assert any("연결되지 않" in c for c in out)  # placeholder 비동작 정직 표면화(P2-a)
 
 
 def test_install_mcp_launch_command_is_idempotent(tmp_path):

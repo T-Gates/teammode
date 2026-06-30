@@ -512,12 +512,16 @@ class Adapter:
             elif "command" in entry:
                 changes.append(f"[mcp] {alias} 등록(기동 커맨드)")
             else:
-                # 호스티드도 기동 커맨드도 없음(slack/google 등) — 죽은 자리만 두되,
-                # 직접 붙여야 동작함을 수동 명령 예시로 명확히 안내(issue #20).
+                # 호스티드도 기동 커맨드도 없음(slack/google 등) — teammode 가 자동
+                # 등록 못 함. placeholder 는 관리 별칭(alias=`tm-<provider>`)으로만 잡히고
+                # **연결되지 않는다**. 안내도 관리 별칭 기준으로 정직하게(codex review P2-a):
+                # 사용자가 `provider`(예: slack)로 따로 추가하면 별개 서버가 생겨 별칭
+                # 불일치/오해 → 같은 관리 별칭으로 직접 붙이도록 안내.
                 changes.append(
-                    f"[mcp] {alias} 등록(자리만 — 공식 호스티드 MCP 미제공). "
-                    f"수동 연결 필요: `claude mcp add {provider} -- <MCP 서버 기동 커맨드>` "
-                    f"(register_hint 참고)")
+                    f"[mcp] {alias} placeholder 등록(공식 호스티드 MCP 부재 → teammode "
+                    f"자동 등록 불가, 이 placeholder 는 연결되지 않음). 직접 쓰려면 같은 "
+                    f"관리 별칭으로 수동 연결: `claude mcp add {alias} -- "
+                    f"<MCP 서버 기동 커맨드>` (register_hint 참고)")
 
         # [P1 삭제] handlers/role_server 폐기 — teammode 단일 MCP 서버 등록 블록 제거.
         # 이제 install_mcp 는 config services 의 벤더 provider alias 만 등록한다.
