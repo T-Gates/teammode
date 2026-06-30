@@ -80,8 +80,10 @@ class Adapter(BaseAdapter):
         Codex 는 hook command 를 셸로 실행하고(공식 hooks 문서가 command 에 `$(...)` 명령
         치환 예시를 보이는 것이 근거) command hook 에 env 필드가 없으므로, 멀티멤버 팀에서
         '나'를 가르는 TEAMMODE_MEMBER(session-log-remind·kb-write-guard 의 단일 소스)를
-        `env VAR=val <command>` prefix 로 전달한다. member 미지정이거나 형식이 이상하면
-        prefix 없이 기본 command 를 반환한다(하위호환·fail-safe). 값은 ascii 영숫자로 시작하는
+        `env VAR=val <command>` prefix 로 전달한다. member 가 self.member·기존 prefix 둘 다
+        없거나 형식이 이상하면 prefix 없이 기본 command 를 반환한다(하위호환·fail-safe).
+        self.member 가 None 이면 현재 config.toml 에 박힌 기존 prefix 를 재사용한다(self-healing,
+        `_existing_member_prefix`) — member 없이 도는 `tm on/off` resync 가 prefix 를 떨구지 않게. 값은 ascii 영숫자로 시작하는
         '-_' 단일 토큰만 허용 — command 가 셸로 실행되므로 공백/메타문자 토큰은 인젝션 위험이
         있어 거부한다(session-log-remind `_valid_member_name` 과 동일 규칙). TEAMMODE_HOME 은
         셸 프로파일/`__file__` 폴백으로 이미 닿으므로 prefix 에 넣지 않는다(경로 공백/따옴표
@@ -89,10 +91,36 @@ class Adapter(BaseAdapter):
         known-limitation 참조).
         """
         command = super().build_command(entry)
-        member = self.member
+        # self.member(install/`tm on --member` 경로) 우선, 없으면 self-healing 으로 현재
+        # config.toml 에 이미 박힌 prefix 를 재사용 — member 없이 도는 `tm on/off` resync 가
+        # prefix 를 떨구는 회귀를 막는다(issue #26, codex review).
+        member = self.member or self._existing_member_prefix()
         if member and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", member):
             return f"env TEAMMODE_MEMBER={member} {command}"
         return command
+
+    def _existing_member_prefix(self) -> Optional[str]:
+        """현재 config.toml 의 managed hook 블록에서 기존 `env TEAMMODE_MEMBER=<x>` 를 파싱.
+
+        self.member 가 None 일 때 build_command 가 호출(self-healing) — caller(예: member
+        없이 `tm on` 하는 cmd_on)가 누구든 한 번 박힌 prefix 를 유지하게 한다. 안전을 위해
+        **teammode-hooks 마커 블록 범위 안**에서만 찾고(사용자 다른 hook 오염 방지), 값은
+        검증 정규식과 동일한 안전 토큰만 매칭한다. sync 가 _write_block 으로 블록을 덮어쓰기
+        **전**에 _read_config() 가 옛 블록을 돌려주므로 이 파싱이 성립한다. 부재/깨짐 → None.
+        """
+        try:
+            existing = self._read_config()
+        except Exception:  # noqa: BLE001 — 설정 읽기 실패는 prefix 미보존(무해)로 강등
+            return None
+        if not existing:
+            return None
+        m = re.search(
+            re.escape(BLOCK_START) + r"(.*?)" + re.escape(BLOCK_END), existing, re.S)
+        scope = m.group(1) if m else ""
+        if not scope:
+            return None
+        pm = re.search(r"env TEAMMODE_MEMBER=([A-Za-z0-9][A-Za-z0-9_-]*)", scope)
+        return pm.group(1) if pm else None
 
     def sync(self, mode: Optional[str] = None) -> list:
         changes = []
