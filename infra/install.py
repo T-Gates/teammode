@@ -30,6 +30,7 @@ AGENTS = INFRA / "agents"
 sys.path.insert(0, str(INFRA))
 import install_lib as il  # noqa: E402
 import git_ops as _git_ops  # noqa: E402  — scaffold 자동 커밋+push(do_commit) 재사용
+import i18n as _i18n  # noqa: E402
 # stdout/stderr UTF-8 보장 — Windows native 인코딩(cp949 등)에서 한글 print 깨짐·크래시 방지.
 from io_encoding import ensure_utf8_io  # noqa: E402
 
@@ -525,6 +526,11 @@ def _detect(team_root: Path, home: Path) -> dict:
     }
 
 
+def _done_message(det: dict) -> str:
+    """설치 완료 메시지(현지화). det['locale'] 언어로, 미지원 시 en_US."""
+    return _i18n.t("done_installed", _i18n.resolve_lang(det.get("locale")))
+
+
 def _email_is_push_safe(email) -> bool:
     """GitHub push-safe 이메일인지 — noreply 도메인이면 private-email 보호(GH007)와 무관."""
     return bool(email) and str(email).strip().lower().endswith(
@@ -848,7 +854,8 @@ def bootstrap(opts: il.Options, *, home: Path, python_version,
     except (ValueError, json.JSONDecodeError):
         err("[error] verify: context --json 출력이 JSON 이 아닙니다.")
         return 3
-    out(f"[verify] 설치 검증 OK — members={len(ctx.get('members', []))} (팀모드는 꺼둠).")
+    out(_i18n.t("verify_ok", _i18n.resolve_lang(det.get("locale")),
+                n=len(ctx.get("members", []))))
 
     # scaffold·members·config 자동 커밋+push — onboarding 은 "자기 등재가 바로 팀 레포에"가 맞다
     # (은수 결정 2026-06-23, "푸시는 사람" 철학 폐기). 실설치(--yes, 격리 아님)에서만 수행.
@@ -863,7 +870,7 @@ def bootstrap(opts: il.Options, *, home: Path, python_version,
         elif getattr(_cr, "ok", False) or getattr(_cr, "committed", False):
             out("[push] 커밋 완료 — push 실패(원격/권한 확인 후 `git push` 하세요).")
 
-    out("[done] 설치 완료. 팀모드를 켜려면 `tm on`(또는 /tm) 하세요.")
+    out(_done_message(det))
     return 0
 
 
