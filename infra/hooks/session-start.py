@@ -151,7 +151,7 @@ def _maybe_auto_pull(team_root: str) -> None:
             # ok=True·ahead=0 을 주지만(추적 upstream 없음), 그건 직전 push 실패가 미해결인
             # 채로 정합을 못 한 상태다 — 여기서 지우면 #23 의 push 실패 가시성이 깨진다.
             # ahead-only/fetch-failed/conflict/error 도 미해결이므로 마커를 보존한다.
-            _git_ops.clear_sync_warning()
+            _git_ops.clear_sync_warning(team_root)
     except Exception:  # noqa: BLE001 — 철칙: 무슨 일이 있어도 세션·주입을 막지 않는다
         pass
 

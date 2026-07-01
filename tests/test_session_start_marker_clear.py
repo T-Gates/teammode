@@ -46,8 +46,9 @@ class _FakeGitOps:
     def write_sync_warning(self, team_root, detail):
         self.writes.append((team_root, detail))
 
-    def clear_sync_warning(self):
+    def clear_sync_warning(self, team_root):
         self.cleared += 1
+        self.cleared_root = team_root
 
 
 def _run(result, tmp_path, monkeypatch):

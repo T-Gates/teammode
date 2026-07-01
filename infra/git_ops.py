@@ -12,6 +12,7 @@ killpg·`--ff-only`·subprocess+git 양쪽 타임아웃·자격증명/SSH 프롬
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import signal
 import subprocess
@@ -329,8 +330,13 @@ def do_reconcile(team_root: str, timeout: int = DEFAULT_TIMEOUT) -> ReconcileRes
 #   push 실패는 "이 클론이 origin 에 못 올렸다"는 **머신 로컬** 사실이다. memory/ 는
 #   팀 공유라 마커를 거기 두면 git add 로 다른 클론까지 새어 들어가(.gitignore 철학에
 #   어긋남 — auto_pull throttle state 와 동일 사유). 그래서 팀 루트 밖 XDG 에 둔다.
-#   여러 팀을 한 머신에서 쓰면 파일은 1개라 마지막 기록이 이긴다 — 내용에 team_root 를
-#   박아 read 시 현재 루트와 다르면 무시(타 팀 마커 오표시 방지).
+#
+# 왜 team_root 별 파일인가(codex 리뷰 P2):
+#   마커를 단일 파일로 두면 한 머신에 팀 레포가 둘일 때 repo B 의 성공적 push/reconcile
+#   이 부르는 clear 가 repo A 의 **미해결** push-실패 마커까지 지워, repo A 의 다음 세션이
+#   "로컬 커밋 미push"를 못 띄운다(교차팀 격리 붕괴 + write 경합 "마지막이 이김"). 그래서
+#   파일명에 team_root 안정 해시를 넣어 팀마다 독립 파일을 쓰고, write/read/clear 모두
+#   team_root 를 받아 **자기 파일만** 다룬다. 파일 자체가 팀별이라 내부 root 대조는 불필요.
 
 def _state_dir() -> str:
     base = os.environ.get("XDG_STATE_HOME") or os.path.join(
@@ -338,42 +344,48 @@ def _state_dir() -> str:
     return os.path.join(base, "teammode")
 
 
-def sync_warning_path() -> str:
-    """push/정합 실패 가시화 마커 경로(팀 루트 밖 머신 로컬 상태)."""
-    return os.path.join(_state_dir(), "sync-warning")
+def _team_key(team_root: str) -> str:
+    """team_root 의 안정 해시(파일명용). normpath 로 정규화해 raw env('/x/')·str(Path)
+    ('/x') 표기차를 흡수한 뒤 sha1 앞 16 hex — 팀별 마커 파일을 결정적으로 가른다."""
+    norm = os.path.normpath(str(team_root))
+    return hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16]
+
+
+def sync_warning_path(team_root: str) -> str:
+    """team_root 별 push/정합 실패 가시화 마커 경로(팀 루트 밖 머신 로컬 상태).
+
+    파일명에 team_root 해시를 넣어 한 머신의 여러 팀 레포가 서로의 마커를 덮어쓰거나
+    (write 경합) 교차 삭제(clear)하지 못하게 한다(codex 리뷰 P2).
+    """
+    return os.path.join(_state_dir(), f"sync-warning-{_team_key(team_root)}")
 
 
 def write_sync_warning(team_root: str, detail: str) -> None:
-    """push/정합 실패를 마커로 남긴다(session-start 가 읽어 표면화). 무raise.
-
-    key 는 normpath 로 정규화 — 호출부가 raw env 문자열('/x/')이든 str(Path)('/x')든
-    동일 키가 되게 한다(auto-commit 와 session-start 의 team_root 표기 차이 흡수).
-    """
+    """push/정합 실패를 team_root 전용 마커로 남긴다(session-start 가 읽어 표면화). 무raise."""
     try:
         os.makedirs(_state_dir(), exist_ok=True)
-        with open(sync_warning_path(), "w", encoding="utf-8") as f:
-            f.write(f"{os.path.normpath(str(team_root))}\t{detail}")
+        with open(sync_warning_path(team_root), "w", encoding="utf-8") as f:
+            f.write(detail)
     except OSError:
         pass  # 마커 기록 실패는 작업을 막지 않는다(가시화는 best-effort)
 
 
 def read_sync_warning(team_root: str) -> str:
-    """현재 team_root 의 sync-warning 마커 내용(없거나 타 팀이면 ''). 무raise."""
+    """team_root 전용 sync-warning 마커 내용(없으면 ''). 무raise."""
     try:
-        with open(sync_warning_path(), encoding="utf-8") as f:
-            raw = f.read()
+        with open(sync_warning_path(team_root), encoding="utf-8") as f:
+            return f.read().strip()
     except (OSError, ValueError):
         return ""
-    root, _, detail = raw.partition("\t")
-    if root != os.path.normpath(str(team_root)):
-        return ""   # 다른 팀 클론이 남긴 마커 — 오표시 방지로 무시
-    return detail.strip()
 
 
-def clear_sync_warning() -> None:
-    """sync-warning 마커 제거(push/정합이 회복되면 호출). 무raise."""
+def clear_sync_warning(team_root: str) -> None:
+    """team_root 전용 sync-warning 마커만 제거(push/정합이 회복되면 호출). 무raise.
+
+    자기 팀 파일만 지우므로 같은 머신의 다른 팀 레포 마커를 건드리지 않는다(P2 수정 핵심).
+    """
     try:
-        os.remove(sync_warning_path())
+        os.remove(sync_warning_path(team_root))
     except OSError:
         pass
 

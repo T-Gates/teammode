@@ -104,7 +104,7 @@ def main() -> int:
             print(f"[teammode] auto-commit push 실패(로컬 커밋은 보존) — "
                   f"{result.detail}", file=sys.stderr)
         elif getattr(result, "pushed", False):
-            _git_ops.clear_sync_warning()
+            _git_ops.clear_sync_warning(root)
     except Exception:  # noqa: BLE001 — 철칙: 자동 커밋·push 실패가 작업을 막지 않는다
         return 0
 

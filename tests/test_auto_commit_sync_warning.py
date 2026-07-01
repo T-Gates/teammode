@@ -39,8 +39,9 @@ class _FakeGitOps:
     def write_sync_warning(self, root, detail):
         self.warnings.append((root, detail))
 
-    def clear_sync_warning(self):
+    def clear_sync_warning(self, root):
         self.cleared += 1
+        self.cleared_root = root
 
 
 def _run(mod, fake, root, monkeypatch):

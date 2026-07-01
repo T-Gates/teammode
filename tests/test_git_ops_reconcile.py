@@ -159,7 +159,7 @@ def test_ahead_behind_counts(remote_clone):
     assert behind == 1
 
 
-# ── sync-warning 마커 ──
+# ── sync-warning 마커 (team_root 별 파일 — codex 리뷰 P2) ──
 
 def test_sync_warning_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
@@ -167,13 +167,44 @@ def test_sync_warning_roundtrip(tmp_path, monkeypatch):
     assert go.read_sync_warning(root) == ""        # 없음
     go.write_sync_warning(root, "push 실패: GH007")
     assert "GH007" in go.read_sync_warning(root)
-    go.clear_sync_warning()
+    go.clear_sync_warning(root)
     assert go.read_sync_warning(root) == ""
 
 
-def test_sync_warning_cross_team_isolation(tmp_path, monkeypatch):
+def test_sync_warning_per_team_paths_differ():
+    # 팀마다 마커 파일 경로가 달라야 교차 간섭이 없다(격리의 근거).
+    assert go.sync_warning_path("/team/alpha") != go.sync_warning_path("/team/beta")
+    # 표기차(trailing slash)는 같은 파일로 정규화.
+    assert go.sync_warning_path("/team/alpha") == go.sync_warning_path("/team/alpha/")
+
+
+def test_sync_warning_read_isolated_by_team(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     go.write_sync_warning("/team/alpha", "alpha 경고")
-    # 다른 팀 루트로 읽으면 무시(오표시 방지).
+    # 다른 팀은 자기 파일이 없어 빈 문자열.
     assert go.read_sync_warning("/team/beta") == ""
     assert go.read_sync_warning("/team/alpha") == "alpha 경고"
+
+
+def test_sync_warning_clear_does_not_touch_other_team(tmp_path, monkeypatch):
+    # 핵심 P2 회귀: repo B 의 clear 가 repo A 의 미해결 마커를 지우면 안 된다.
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    go.write_sync_warning("/team/alpha", "alpha 미해결 push 실패")
+    go.clear_sync_warning("/team/beta")     # repo B 성공 → 자기 것만 지움(없음)
+    assert go.read_sync_warning("/team/alpha") == "alpha 미해결 push 실패"  # 보존
+
+
+def test_sync_warning_clear_same_team_removes(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    go.write_sync_warning("/team/alpha", "alpha 경고")
+    go.clear_sync_warning("/team/alpha")
+    assert go.read_sync_warning("/team/alpha") == ""
+
+
+def test_sync_warning_two_teams_coexist(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    go.write_sync_warning("/team/alpha", "A")
+    go.write_sync_warning("/team/beta", "B")
+    # 독립 공존 — write 경합("마지막이 이김") 없음.
+    assert go.read_sync_warning("/team/alpha") == "A"
+    assert go.read_sync_warning("/team/beta") == "B"
