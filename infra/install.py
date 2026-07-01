@@ -692,7 +692,7 @@ def bootstrap(opts: il.Options, *, home: Path, python_version,
 
     # 멤버 이름 결정 (§3·m1): --member-name 우선 → git user.name 제안.
     # 추측 금지: 이름을 못 정하면 exit 3(신원 추측 금지, §12-3).
-    role = det["role"]
+    role = il.detect_role(team_root, forced=opts.role_intent)
     member_name = opts.member_name or det["member_name_suggestion"]
     # 팀명 우선순위: init 위저드 --team-name(opts.team_name) → 레포명 감지 → 폴더명.
     team_name_default = opts.team_name or det["team_name_default"] or team_root.name
