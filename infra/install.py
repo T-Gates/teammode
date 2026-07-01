@@ -898,6 +898,8 @@ teammode 결정적 부트스트랩 + 어댑터 디스패처.
 주요 플래그:
   --root PATH          팀 루트 경로 (필수; env 무신뢰)
   --member-name NAME   세션로그 author 영문 이름
+  --team-name NAME     init 위저드 팀명 (team.name·배너·배지 소스)
+  --role-intent ROLE   도입자/멤버 확정 (introducer|member; init/join 이 자동 지정)
   --role TEXT          직책/직군 (예: 팀장/개발)
   --yes                실 ~/.claude/settings.json 배선 허용 (실설치)
   --settings PATH      격리 settings 경로 (테스트·CI)
