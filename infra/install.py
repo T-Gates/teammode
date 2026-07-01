@@ -520,6 +520,8 @@ def _detect(team_root: Path, home: Path) -> dict:
         "agents": il.detect_agents(home),
         "remote_authed": remote_authed,
         "role": il.detect_role(team_root),
+        "locale": il.detect_host_locale(),
+        "timezone": il.detect_host_timezone(),
     }
 
 
