@@ -22,6 +22,7 @@ import json
 import os
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -232,19 +233,90 @@ def test_do_commit_local_subcalls_use_default_timeout(tmp_path, monkeypatch):
 
 
 def test_do_commit_push_uses_function_timeout(tmp_path, monkeypatch):
-    """push=True: push(네트워크)만 함수 timeout 을 쓰고 로컬 하위호출은 그대로 2s."""
+    """push=True: push(네트워크)만 함수 timeout 을 쓰고 로컬 하위호출은 그대로 2s.
+
+    codex 재리뷰 P1 이후 push timeout 은 남은 총예산(PUSH_TOTAL_BUDGET)으로도
+    클램프되므로, 예산보다 작은 timeout(7s)으로 '함수 timeout 이 그대로 쓰임'을 본다.
+    """
     calls = []
     monkeypatch.setattr(git_ops, "run_git", _fake_run_git_recorder(calls))
-    res = git_ops.do_commit(str(tmp_path), "m", push=True, timeout=77)
+    res = git_ops.do_commit(str(tmp_path), "m", push=True, timeout=7)
     assert res.pushed is True
     push_calls = _calls_with_verb(calls, "push")
     assert push_calls, f"push 호출 없음: {calls}"
     for args, t in push_calls:
-        assert t == 77, f"push 가 함수 timeout 아닌 {t} 사용: {args}"
+        assert t == 7, f"push 가 함수 timeout 아닌 {t} 사용: {args}"
     for verb in ("add", "commit"):
         for args, t in _calls_with_verb(calls, verb):
             assert t == git_ops.DEFAULT_TIMEOUT, (
                 f"{verb} 가 함수 네트워크 timeout 으로 승격됨: {args}")
+
+
+# ──────────────────────────────────────────────────────────────────
+# codex 재리뷰 P1 — push 흐름 공유 데드라인(PUSH_TOTAL_BUDGET)
+# ──────────────────────────────────────────────────────────────────
+#
+# do_commit(push=True)의 복구 체인은 push→push -u→fetch→rebase→push -u 로
+# NET_TIMEOUT(10s) 네트워크 호출을 최대 5회 순차 수행할 수 있다(최악 ~50s).
+# 훅 manifest 캡(30s)이 먼저 프로세스를 죽이면 로컬 커밋/rebase 뒤에 써야 할
+# sync-warning 마커가 유실된다. 엔진은 공유 총예산 안에서 **스스로** 반환해야 한다.
+
+def test_push_total_budget_exists_and_below_net_worst_case():
+    assert hasattr(git_ops, "PUSH_TOTAL_BUDGET")
+    # 예산은 단일 네트워크 호출(NET_TIMEOUT)보다는 커야 정상 push 를 막지 않고,
+    # 최악 5회 순차(50s)보다는 작아야 의미가 있다.
+    assert git_ops.NET_TIMEOUT < git_ops.PUSH_TOTAL_BUDGET < 5 * git_ops.NET_TIMEOUT
+
+
+def test_do_commit_push_budget_exhaustion_returns_with_marker_friendly_result(
+        tmp_path, monkeypatch):
+    """복구 체인 도중 총예산이 바닥나면 do_commit 이 hang 없이 스스로 반환한다.
+
+    가짜 시계: time.monotonic 호출마다 12s 씩 전진 → 네트워크 호출 몇 번 만에
+    데드라인(+25s)을 넘긴다. 평문 push 는 non-ff 로 실패시켜 복구 체인에 진입시킨다.
+    기대: committed=True 보존, pushed=False, detail 에 'budget'(호출부 훅이
+    sync-warning 마커를 쓸 수 있게 결과가 반환됨).
+    """
+    fake_now = {"t": 0.0}
+
+    def fake_monotonic():
+        fake_now["t"] += 12.0
+        return fake_now["t"]
+
+    monkeypatch.setattr(git_ops, "time",
+                        types.SimpleNamespace(monotonic=fake_monotonic))
+
+    def fake_run_git(args, timeout):
+        assert timeout >= 1  # 클램프 하한(음수/0 타임아웃 금지)
+        if "rev-parse" in args:            # is_git_worktree
+            return (0, "true", "")
+        if "diff" in args:                 # staged-diff: rc!=0 == 변경 있음
+            return (1, "", "")
+        if "push" in args:                 # 평문 push → non-ff 거부(복구 체인 진입)
+            return (1, "", "error: failed to push some refs\n"
+                           "hint: Updates were rejected because the remote "
+                           "contains work that you do not have locally.")
+        return (0, "", "")                 # add/commit/fetch/rebase 성공
+    monkeypatch.setattr(git_ops, "run_git", fake_run_git)
+
+    res = git_ops.do_commit(str(tmp_path), "m", push=True)
+    assert res.ok is True
+    assert res.committed is True           # 커밋은 보존(철칙)
+    assert res.pushed is False
+    assert "budget" in res.detail, res.detail
+
+
+def test_do_commit_push_fast_path_unaffected_by_budget(tmp_path, monkeypatch):
+    """정상 경로(첫 push 즉시 성공)는 예산 도입과 무관하게 그대로 성공한다."""
+    calls = []
+    monkeypatch.setattr(git_ops, "run_git", _fake_run_git_recorder(calls))
+    res = git_ops.do_commit(str(tmp_path), "m", push=True)
+    assert res.ok is True and res.committed is True
+    assert res.pushed is True
+    assert "budget" not in res.detail
+    # 예산이 넉넉(25s)하므로 push timeout 은 NET_TIMEOUT 그대로.
+    for args, t in _calls_with_verb(calls, "push"):
+        assert t == git_ops.NET_TIMEOUT, f"push timeout={t}: {args}"
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -255,7 +327,11 @@ def test_manifest_network_hooks_timeout_covers_net_flow():
     """session-start(do_reconcile)·auto-commit(do_commit push=True)은 내부에서
     NET_TIMEOUT(10s) 네트워크 호출을 순차로 여러 번 할 수 있다(fetch+push+재시도).
     manifest timeout(초 단위 — adapter 가 무변환 기록)이 3s 면 훅 러너가 git_ops
-    반환 전에 훅을 죽여 정리·sync-warning 기록까지 날린다. 최소 30s 를 보장한다."""
+    반환 전에 훅을 죽여 정리·sync-warning 기록까지 날린다.
+
+    핵심 불변식(codex 재리뷰 P1): manifest timeout > PUSH_TOTAL_BUDGET —
+    엔진의 push 총예산이 훅 캡보다 **작아야** 엔진이 스스로 먼저 반환해
+    sync-warning 마커를 쓸 수 있다(절대값 30 이 아니라 관계가 본질)."""
     manifest = json.loads(
         (REPO / "infra" / "hooks" / "manifest.json").read_text(encoding="utf-8"))
     net_scripts = {"session-start.py", "auto-commit.py"}
@@ -264,7 +340,8 @@ def test_manifest_network_hooks_timeout_covers_net_flow():
         if entry.get("script") in net_scripts:
             seen.add(entry["script"])
             assert entry.get("_timeout_unit") == "seconds"
-            assert entry.get("timeout", 0) >= 30, (
-                f"{entry['script']}: manifest timeout={entry.get('timeout')} — "
-                f"NET_TIMEOUT(10s) 순차 네트워크 호출을 못 덮음")
+            assert entry.get("timeout", 0) > git_ops.PUSH_TOTAL_BUDGET, (
+                f"{entry['script']}: manifest timeout={entry.get('timeout')} ≤ "
+                f"PUSH_TOTAL_BUDGET={git_ops.PUSH_TOTAL_BUDGET} — 훅 러너가 "
+                f"엔진 반환 전에 죽여 sync-warning 마커가 유실됨")
     assert seen == net_scripts, f"네트워크 훅 누락: {net_scripts - seen}"
