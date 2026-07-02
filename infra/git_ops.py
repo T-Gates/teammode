@@ -18,9 +18,16 @@ import signal
 import subprocess
 from dataclasses import dataclass
 
-# git 네트워크 작업의 기본 타임아웃(초) — hang 으로 작업을 막지 않게 한다.
-# 2초: pull/fetch 가 2초 초과면 비치명 실패(로컬 commit/checkout 도 2초 충분).
+# git 로컬 작업의 기본 타임아웃(초) — hang 으로 작업을 막지 않게 한다.
+# 2초: 로컬 commit/checkout/rev-list 류는 2초면 충분(세션 시작 스냅함 유지).
 DEFAULT_TIMEOUT = 2
+
+# git 네트워크 작업(push/pull/fetch/ls-remote)의 기본 타임아웃(초).
+# 실 GitHub SSH 왕복은 평시에도 2~3초+ 걸려 2초 컷이 멀쩡한 push/pull 을 죽였다
+# (이슈 #33). 로컬 동사는 DEFAULT_TIMEOUT(2s) 유지 — 세션 시작을 굼뜨게 하지 않는다.
+# ⚠️ http_timeout_opts(http.lowSpeedTime)는 HTTPS 전용이라 SSH 원격에선 무력 —
+# subprocess killpg(run_git)가 SSH 의 **유일한** hang 가드다.
+NET_TIMEOUT = 10
 
 
 @dataclass
@@ -181,7 +188,7 @@ def is_git_worktree(team_root: str) -> bool:
 _is_git_worktree = is_git_worktree
 
 
-def do_pull(team_root: str, timeout: int = DEFAULT_TIMEOUT) -> PullResult:
+def do_pull(team_root: str, timeout: int = NET_TIMEOUT) -> PullResult:
     """`git pull --ff-only` 실행. 절대 예외를 전파하지 않는다(철칙).
 
     실패(네트워크 없음·ff 불가·충돌·타임아웃·git 아님) → PullResult(ok=False).
@@ -236,7 +243,7 @@ def ahead_behind(team_root: str, timeout: int = DEFAULT_TIMEOUT):
     return (ahead, behind)
 
 
-def do_reconcile(team_root: str, timeout: int = DEFAULT_TIMEOUT) -> ReconcileResult:
+def do_reconcile(team_root: str, timeout: int = NET_TIMEOUT) -> ReconcileResult:
     """fetch 후 추적 upstream 과 **실제 정합**(ff 또는 rebase --autostash). 무raise(철칙).
 
     do_pull 의 `pull --ff-only` 는 로컬이 diverge(ahead>0 & behind>0)면 조용히 실패해
@@ -431,7 +438,7 @@ def _has_staged_changes(team_root: str, timeout: int) -> bool:
 
 
 def do_commit(team_root: str, message: str, push: bool = False,
-              timeout: int = DEFAULT_TIMEOUT, paths: list | None = None) -> CommitResult:
+              timeout: int = NET_TIMEOUT, paths: list | None = None) -> CommitResult:
     """`git add` + `git commit -m` (+ 선택 push). 절대 예외를 전파하지 않는다(철칙).
 
     auto_pull/do_pull 과 같은 안전장치 재사용(git_env 자격증명 차단·killpg 타임아웃).
@@ -583,7 +590,7 @@ def _has_remote(team_root: str, remote: str, timeout: int) -> bool:
 
 
 def fetch_upstream(team_root: str, remote: str = "upstream",
-                   timeout: int = DEFAULT_TIMEOUT) -> FetchResult:
+                   timeout: int = NET_TIMEOUT) -> FetchResult:
     """upstream(템플릿 원본)을 **fetch 만** 한다. 절대 예외 전파 없음(철칙).
 
     **merge 하지 않는다** — 적용은 명시적 update 동사 몫(은수 합의: fetch 만 자동).
@@ -778,7 +785,7 @@ def sync_from_upstream(team_root: str, remote: str = "upstream",
                        branch: str | None = None,
                        paths: list | None = None,
                        dry_run: bool = False,
-                       timeout: int = DEFAULT_TIMEOUT) -> SyncResult:
+                       timeout: int = NET_TIMEOUT) -> SyncResult:
     """upstream 의 엔진 경로(SYNC_PATHS)를 working tree 로 덮어써 동기화. 무raise(철칙).
 
     merge 를 쓰지 않으므로 unrelated histories 와 무관하게 동작한다. 흐름:
