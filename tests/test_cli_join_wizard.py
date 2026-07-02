@@ -199,6 +199,66 @@ class TestNonTtyPath:
         assert "claude" in agents_passed
         assert "codex" in agents_passed
 
+    # ─── #6: 비-TTY 기본 위치·정직한 안내 ────────────────────────────────
+
+    def test_no_dir_defaults_to_home_teammode(self, tmp_path):
+        """--dir 없으면 clone 이 cwd 가 아니라 ~/teammode/<repo> 로 향한다(#6).
+
+        TTY wizard 의 기본값(home/"teammode"/repo_name)과 동일해야 한다.
+        """
+        home = tmp_path / "home"
+        dest = home / "teammode" / "team"
+        (dest / "infra").mkdir(parents=True)
+        (dest / "infra" / "install.py").write_text("# fake")
+
+        with patch.object(sys.stdin, "isatty", return_value=False), \
+             patch("teammode.cli.Path.home", return_value=home), \
+             patch("teammode.cli.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            rc = cli.main(["join", "https://github.com/org/team.git",
+                           "--member-name", "alice"])
+        assert rc == 0
+        # git clone 대상이 기본 위치(~/teammode/team)여야 한다
+        clone_args = mock_run.call_args_list[0][0][0]
+        assert clone_args[:2] == ["git", "clone"]
+        assert str(dest) in clone_args, f"clone 대상이 {dest} 가 아님: {clone_args}"
+        # install.py 위임의 --root 도 같은 dest
+        install_args = None
+        for c in mock_run.call_args_list:
+            a = c[0][0] if c[0] else []
+            if isinstance(a, list) and any("install.py" in str(x) for x in a):
+                install_args = a
+        assert install_args is not None
+        assert str(dest) in install_args
+
+    def test_explicit_dir_wins_over_default(self, tmp_path):
+        """--dir 지정 시 기본값(~/teammode) 대신 지정 경로가 그대로 쓰인다."""
+        home = tmp_path / "home"
+        home.mkdir()
+        dest = tmp_path / "elsewhere"
+        (dest / "infra").mkdir(parents=True)
+        (dest / "infra" / "install.py").write_text("# fake")
+
+        with patch.object(sys.stdin, "isatty", return_value=False), \
+             patch("teammode.cli.Path.home", return_value=home), \
+             patch("teammode.cli.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            rc = cli.main(["join", "https://github.com/org/team.git",
+                           "--dir", str(dest), "--member-name", "alice"])
+        assert rc == 0
+        clone_args = mock_run.call_args_list[0][0][0]
+        assert str(dest) in clone_args
+        assert not any(str(home / "teammode") in str(a) for a in clone_args)
+
+    def test_non_tty_prints_defaults_notice(self, tmp_path, capsys):
+        """비-TTY 는 조용히 기본값을 쓰지 않고 정직한 안내 한 줄을 찍는다(#6)."""
+        rc, _ = self._run_join(tmp_path, member_name="alice")
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "비대화 모드" in out
+        assert "기본값" in out
+        assert "tm-onboard" in out
+
 
 # ─── 빈 슬러그 fallback ─────────────────────────────────────────────────────
 
