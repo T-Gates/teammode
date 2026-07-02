@@ -43,6 +43,14 @@ try:
     import git_ops as _git_ops  # type: ignore
 except ImportError:  # git_ops 부재여도 작업을 막지 않는다(실패 무해)
     _git_ops = None
+# stderr UTF-8 보장 — 한글 경고(_warn_if_stale_home)가 cp949 환경에서 mojibake 되지
+# 않게(codex P2). 형제 훅(session-start 등)과 동일 패턴.
+try:
+    from io_encoding import ensure_utf8_io as _ensure_utf8_io  # type: ignore
+except ImportError:
+    def _ensure_utf8_io() -> None:  # 모듈 부재여도 훅은 동작(보정만 스킵)
+        pass
+_ensure_utf8_io()
 
 
 def _team_root() -> str:
