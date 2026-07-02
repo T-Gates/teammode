@@ -1231,7 +1231,13 @@ def _root_index_find_row(lines: list, path: str, prefix: bool = False) -> "int |
     """
     marker = f"`{path}" + ("" if prefix else "`")
     for i, line in enumerate(lines):
-        if marker in line and line.strip().startswith("|"):
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        # 첫 번째 칸(경로 열)만 매칭 — 설명 칸의 `soma/` 언급이 실제 route 행
+        # 없이 커버로 오인되는 false-negative 차단(codex P2).
+        first_cell = stripped.split("|", 2)[1] if stripped.count("|") >= 2 else ""
+        if marker in first_cell:
             return i
     return None
 

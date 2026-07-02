@@ -151,3 +151,17 @@ def test_hint_suggested_command_registers_and_silences(tmp_path):
     r3 = _write(tmp_path, "soma", "b.md")
     assert r3.returncode == 0, r3.stderr
     assert "[hint]" not in r3.stdout
+
+
+def test_mention_in_desc_cell_does_not_suppress_hint(tmp_path):
+    """설명 칸의 백틱 언급은 커버가 아니다 — 경로 칸만 판정(codex P2)."""
+    import sys as _sys
+    _sys.path.insert(0, str(REPO / "infra"))
+    import teammode as tm
+    idx = tmp_path / "INDEX.md"
+    idx.write_text(
+        "# idx\n\n| 경로 | 여기에 넣는 것 |\n|---|---|\n"
+        "| `product/` | 제품 — 관련 참고는 `soma/` 언급 |\n",
+        encoding="utf-8")
+    assert tm._root_index_covers_top(idx, "product/") is True
+    assert tm._root_index_covers_top(idx, "soma/") is False  # 설명 칸 언급은 무시
