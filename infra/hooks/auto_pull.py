@@ -32,6 +32,7 @@ import git_ops as _git_ops  # noqa: E402
 PullResult = _git_ops.PullResult
 do_pull = _git_ops.do_pull
 DEFAULT_TIMEOUT = _git_ops.DEFAULT_TIMEOUT
+NET_TIMEOUT = _git_ops.NET_TIMEOUT
 
 # 기본 스로틀 — 5분. 호출부가 명시 주입할 수 있다(테스트는 항상 주입).
 DEFAULT_THROTTLE_SECONDS = 300
@@ -77,7 +78,7 @@ def _record_pull_time(state_path: str, now: float) -> None:
 
 def auto_pull(team_root: str, state_path: str, now: float,
               throttle_seconds: int = DEFAULT_THROTTLE_SECONDS,
-              timeout: int = DEFAULT_TIMEOUT) -> AutoPullResult:
+              timeout: int = NET_TIMEOUT) -> AutoPullResult:
     """조립: 스로틀 판정 → pull(git_ops) → 성공/시도 시각 기록.
 
     **철칙**: 어떤 단계에서 무슨 일이 나도 예외를 전파하지 않는다 — 사용자 프롬프트
