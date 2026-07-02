@@ -414,6 +414,21 @@ def _is_non_fast_forward(text: str) -> bool:
             or "[rejected]" in low)
 
 
+def _is_no_upstream(text: str) -> bool:
+    """push 출력(stderr/stdout)이 **upstream 미설정 거부**인지 판정. 무raise.
+
+    새 브랜치(`checkout -b`)에서 평문 `git push` 는 push.default=simple 아래
+    "fatal: The current branch X has no upstream branch. ... use
+    git push --set-upstream origin X" 로 영원히 실패한다(이슈 #34). 이때만
+    `push -u origin HEAD` 1회 재시도를 트리거한다. non-ff·인증 실패와 겹치지
+    않도록 git 의 거부 메시지 패턴으로 좁게 감지한다(LC_ALL=C 로 영어 고정됨).
+    """
+    if not text:
+        return False
+    low = text.lower()
+    return "no upstream branch" in low or "--set-upstream" in low
+
+
 def _abort_rebase(team_root: str, timeout: int) -> None:
     """진행중 rebase 를 취소해 원상복구(`git rebase --abort`). 무raise(best-effort).
 
@@ -513,6 +528,29 @@ def do_commit(team_root: str, message: str, push: bool = False,
     if prc == 0:
         return CommitResult(ok=True, committed=True, pushed=True,
                             detail="committed and pushed")
+
+    # 4-0) upstream 미설정 거부면 자동 복구: `push -u origin HEAD` 1회 재시도(이슈 #34).
+    #      새 브랜치에서 평문 push 는 영원히 실패하므로 upstream 을 심으며 push 한다.
+    #      성공 시 이후 커밋부턴 평문 push 가 그냥 동작한다. non-ff 서명과는 상호 배타
+    #      (upstream 이 없으면 비교 대상 자체가 없음) — 4-1 non-ff 복구와 겹치지 않는다.
+    if _is_no_upstream((perr or "") + "\n" + (pout or "")):
+        try:
+            urc, uout, uerr = run_git(
+                ["-C", team_root, *http_timeout_opts(timeout),
+                 "push", "-u", "origin", "HEAD"],
+                timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return CommitResult(ok=True, committed=True, pushed=False,
+                                detail="committed; push -u timeout")
+        except (OSError, subprocess.SubprocessError) as exc:
+            return CommitResult(ok=True, committed=True, pushed=False,
+                                detail=f"committed; push -u exec error: {exc}")
+        if urc == 0:
+            return CommitResult(ok=True, committed=True, pushed=True,
+                                detail="committed and pushed (set upstream)")
+        return CommitResult(
+            ok=True, committed=True, pushed=False,
+            detail=f"committed; push failed: {((uerr or uout) or '').strip()[:200]}")
 
     # 4-1) non-ff 거부면 자동 복구: fetch → rebase → 재push 1회.
     #      다른 기기가 먼저 push 해 로컬이 behind 일 때 발생. non-ff 가 아닌 실패(인증·
