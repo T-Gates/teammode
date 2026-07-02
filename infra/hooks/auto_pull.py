@@ -31,7 +31,7 @@ import git_ops as _git_ops  # noqa: E402
 # 공개 API re-export(호환): 기존 호출부·테스트가 auto_pull.do_pull/PullResult 를 쓴다.
 PullResult = _git_ops.PullResult
 do_pull = _git_ops.do_pull
-DEFAULT_TIMEOUT = _git_ops.DEFAULT_TIMEOUT
+DEFAULT_TIMEOUT = _git_ops.DEFAULT_TIMEOUT  # ⚠️ 로컬용 2s(호환 유지) — 네트워크 호출(pull/push/fetch)엔 NET_TIMEOUT 을 쓸 것
 NET_TIMEOUT = _git_ops.NET_TIMEOUT
 
 # 기본 스로틀 — 5분. 호출부가 명시 주입할 수 있다(테스트는 항상 주입).

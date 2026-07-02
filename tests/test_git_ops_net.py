@@ -7,9 +7,18 @@
 #34: upstream 미설정 브랜치에서 평문 `git push` 는 영원히 실패한다. do_commit 의
 push 단계가 no-upstream 서명을 감지하면 `push -u origin HEAD` 로 1회 재시도한다.
 
+codex 리뷰 후속(PR #35):
+  - -u 재시도가 non-ff 로 거부되면(원격에 같은 이름 브랜치가 이미 앞서 있음)
+    fetch→rebase→push -u 복구로 이어져야 한다(dead-end 금지).
+  - do_commit 내부의 **로컬** 하위호출(add·staged-diff·commit)은 함수의 네트워크
+    timeout 이 아니라 DEFAULT_TIMEOUT 을 써야 한다(선언된 분리 복원).
+  - 네트워크 훅(session-start·auto-commit)의 manifest timeout 은 NET_TIMEOUT 기반
+    최악 순차 네트워크 호출을 덮어야 한다(3s 는 훅 러너가 git_ops 반환 전에 죽임).
+
 네트워크는 /tmp 로컬 fake remote(bare) 로 모사 — 실 원격·실 ~/.claude 무접촉.
 """
 import inspect
+import json
 import os
 import subprocess
 import sys
@@ -125,3 +134,137 @@ def test_do_commit_second_push_uses_now_set_upstream(new_branch_repo):
     head = _git(clone, "rev-parse", "HEAD").stdout.strip()
     remote_head = _git(origin, "rev-parse", "feat/x").stdout.strip()
     assert head == remote_head
+
+
+# ──────────────────────────────────────────────────────────────────
+# codex P2-1 — no-upstream 재시도(-u)가 non-ff 로 막히면 rebase 복구로 이어진다
+# ──────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def diverged_new_branch_repo(tmp_path):
+    """원격에 feat/x 가 이미 **앞서** 존재 + 로컬 feat/x 는 upstream 미설정.
+
+    시나리오(codex P2-1): 다른 기기가 feat/x 를 먼저 push 해 원격 feat/x 가 커밋
+    하나 앞서 있는데, 이 클론의 feat/x 는 (더 옛 지점에서 만들어져) upstream 연결이
+    없다. 평문 push → no-upstream → `push -u` 재시도 → non-ff 거부. 여기서 끝나면
+    안 되고 fetch→rebase→push -u 복구로 이어져야 한다.
+    """
+    origin = tmp_path / "origin.git"
+    clone_a = tmp_path / "clone_a"
+    clone_b = tmp_path / "clone_b"
+    _git(tmp_path, "init", "--bare", str(origin))
+    _git(tmp_path, "clone", str(origin), str(clone_a))
+    _git(clone_a, "config", "user.name", "t")
+    _git(clone_a, "config", "user.email", "t@t")
+    (clone_a / "a.txt").write_text("v1\n")
+    _git(clone_a, "add", ".")
+    _git(clone_a, "commit", "-m", "c1")
+    _git(clone_a, "branch", "-M", "main")
+    _git(clone_a, "push", "-u", "origin", "main")
+    # 다른 기기(clone_b)가 feat/x 를 먼저 push — 원격 feat/x = c1 + remote-only.
+    _git(tmp_path, "clone", str(origin), str(clone_b))
+    _git(clone_b, "config", "user.name", "t")
+    _git(clone_b, "config", "user.email", "t@t")
+    _git(clone_b, "checkout", "-b", "feat/x")
+    (clone_b / "remote.txt").write_text("from other device\n")
+    _git(clone_b, "add", ".")
+    _git(clone_b, "commit", "-m", "x-remote")
+    _git(clone_b, "push", "-u", "origin", "feat/x")
+    # clone_a: 옛 지점(main=c1)에서 같은 이름 브랜치를 upstream 없이 생성.
+    _git(clone_a, "checkout", "-b", "feat/x", "main")
+    return origin, clone_a
+
+
+def test_do_commit_no_upstream_retry_falls_through_to_rebase(
+        diverged_new_branch_repo):
+    origin, clone = diverged_new_branch_repo
+    (clone / "local.txt").write_text("from this device\n")
+    res = git_ops.do_commit(str(clone), "feat: local", push=True)
+    assert res.ok is True
+    assert res.committed is True
+    # dead-end 금지: -u 의 non-ff 거부에서 멈추지 말고 rebase 복구로 push 성공.
+    assert res.pushed is True, res.detail
+    assert "rebase" in res.detail, res.detail
+    # 원격 feat/x 에 양쪽 커밋(remote-only + 로컬 신규)이 모두 존재(rebase 발생 증거).
+    subjects = _git(origin, "log", "--format=%s", "feat/x").stdout
+    assert "x-remote" in subjects
+    assert "feat: local" in subjects
+    # 로컬도 upstream 이 심어져 원격과 동일 지점.
+    head = _git(clone, "rev-parse", "HEAD").stdout.strip()
+    remote_head = _git(origin, "rev-parse", "feat/x").stdout.strip()
+    assert head == remote_head
+
+
+# ──────────────────────────────────────────────────────────────────
+# codex P2-2 — do_commit 의 로컬 하위호출은 DEFAULT_TIMEOUT, push 만 함수 timeout
+# ──────────────────────────────────────────────────────────────────
+
+def _fake_run_git_recorder(calls):
+    """run_git 대역: (args, timeout) 기록 + 성공 응답. 네트워크 0."""
+    def fake_run_git(args, timeout):
+        calls.append((list(args), timeout))
+        if "rev-parse" in args:            # is_git_worktree
+            return (0, "true", "")
+        if "diff" in args:                 # staged-diff check: rc!=0 == 변경 있음
+            return (1, "", "")
+        return (0, "", "")                 # add/commit/push 성공
+    return fake_run_git
+
+
+def _calls_with_verb(calls, verb):
+    return [(args, t) for args, t in calls if verb in args]
+
+
+def test_do_commit_local_subcalls_use_default_timeout(tmp_path, monkeypatch):
+    """push=False: add·staged-diff·commit 은 함수 timeout(네트워크 기본)이 아니라
+    DEFAULT_TIMEOUT 을 쓴다 — push=False 엔 네트워크 작업이 0이므로."""
+    calls = []
+    monkeypatch.setattr(git_ops, "run_git", _fake_run_git_recorder(calls))
+    res = git_ops.do_commit(str(tmp_path), "m", push=False, timeout=77)
+    assert res.ok is True and res.committed is True
+    for verb in ("add", "diff", "commit"):
+        got = _calls_with_verb(calls, verb)
+        assert got, f"{verb} 호출 없음: {calls}"
+        for args, t in got:
+            assert t == git_ops.DEFAULT_TIMEOUT, (
+                f"{verb} 가 로컬 기본(2s) 아닌 timeout={t} 사용: {args}")
+    assert not _calls_with_verb(calls, "push")
+
+
+def test_do_commit_push_uses_function_timeout(tmp_path, monkeypatch):
+    """push=True: push(네트워크)만 함수 timeout 을 쓰고 로컬 하위호출은 그대로 2s."""
+    calls = []
+    monkeypatch.setattr(git_ops, "run_git", _fake_run_git_recorder(calls))
+    res = git_ops.do_commit(str(tmp_path), "m", push=True, timeout=77)
+    assert res.pushed is True
+    push_calls = _calls_with_verb(calls, "push")
+    assert push_calls, f"push 호출 없음: {calls}"
+    for args, t in push_calls:
+        assert t == 77, f"push 가 함수 timeout 아닌 {t} 사용: {args}"
+    for verb in ("add", "commit"):
+        for args, t in _calls_with_verb(calls, verb):
+            assert t == git_ops.DEFAULT_TIMEOUT, (
+                f"{verb} 가 함수 네트워크 timeout 으로 승격됨: {args}")
+
+
+# ──────────────────────────────────────────────────────────────────
+# codex P1 — 네트워크 훅의 manifest timeout 이 NET_TIMEOUT 설계를 덮는지
+# ──────────────────────────────────────────────────────────────────
+
+def test_manifest_network_hooks_timeout_covers_net_flow():
+    """session-start(do_reconcile)·auto-commit(do_commit push=True)은 내부에서
+    NET_TIMEOUT(10s) 네트워크 호출을 순차로 여러 번 할 수 있다(fetch+push+재시도).
+    manifest timeout(초 단위 — adapter 가 무변환 기록)이 3s 면 훅 러너가 git_ops
+    반환 전에 훅을 죽여 정리·sync-warning 기록까지 날린다. 최소 30s 를 보장한다."""
+    manifest = json.loads(
+        (REPO / "infra" / "hooks" / "manifest.json").read_text(encoding="utf-8"))
+    net_scripts = {"session-start.py", "auto-commit.py"}
+    seen = set()
+    for entry in manifest:
+        if entry.get("script") in net_scripts:
+            seen.add(entry["script"])
+            assert entry.get("_timeout_unit") == "seconds"
+            assert entry.get("timeout", 0) >= 30, (
+                f"{entry['script']}: manifest timeout={entry.get('timeout')} — "
+                f"NET_TIMEOUT(10s) 순차 네트워크 호출을 못 덮음")
+    assert seen == net_scripts, f"네트워크 훅 누락: {net_scripts - seen}"
